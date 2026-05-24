@@ -10,6 +10,7 @@ RUN apt-get update \
         avro-python3==1.10.2 \
         kafka-python==2.0.2 \
         protobuf==3.20.3 \
+        redis==5.2.1 \
         requests==2.32.3 \
         ruamel.yaml==0.18.6 \
     && rm -rf /var/lib/apt/lists/*
