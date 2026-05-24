@@ -1,0 +1,153 @@
+services:
+  flink-python-base:
+    build:
+      context: ./flink
+    image: big-data-project-flink-py:1.19.1
+    command: ["true"]
+    profiles: ["build-only"]
+
+  traffic-api:
+    build:
+      context: ./traffic-api
+    environment:
+      TRAFFIC_DATA_FILE: /data/hanoi_traffic_train_data.json
+      BASE_TIME: "2024-01-01T00:00:00"
+      STEP_MINUTES: "15"
+    volumes:
+      - ./hanoi_traffic_train_data.json:/data/hanoi_traffic_train_data.json:ro
+    ports:
+      - "18000:8000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  kafka:
+    image: confluentinc/cp-kafka:7.7.1
+    hostname: kafka
+    ports:
+      - "9092:9092"
+    environment:
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
+      KAFKA_LISTENERS: PLAINTEXT://kafka:29092,CONTROLLER://kafka:29093,PLAINTEXT_HOST://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "kafka-broker-api-versions --bootstrap-server localhost:9092 >/dev/null 2>&1",
+        ]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+
+  kafka-topic-init:
+    image: confluentinc/cp-kafka:7.7.1
+    depends_on:
+      kafka:
+        condition: service_healthy
+    command:
+      - bash
+      - -lc
+      - kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic trafic.raw_events --partitions 3 --replication-factor 1 && kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic trafic.enriched_events --partitions 3 --replication-factor 1 && kafka-topics --bootstrap-server kafka:29092 --describe --topic trafic.raw_events && kafka-topics --bootstrap-server kafka:29092 --describe --topic trafic.enriched_events
+    restart: "no"
+
+  redpanda-console:
+    image: docker.redpanda.com/redpandadata/console:latest
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "8082:8080"
+    environment:
+      KAFKA_BROKERS: kafka:29092
+    restart: unless-stopped
+
+  flink-jobmanager:
+    build:
+      context: ./flink
+    image: big-data-project-flink-py:1.19.1
+    command: jobmanager
+    ports:
+      - "8081:8081"
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        rest.bind-address: 0.0.0.0
+        parallelism.default: 1
+
+  flink-taskmanager:
+    build:
+      context: ./flink
+    image: big-data-project-flink-py:1.19.1
+    command: taskmanager
+    depends_on:
+      - flink-jobmanager
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        taskmanager.numberOfTaskSlots: 2
+        parallelism.default: 1
+
+  flink-job-submitter:
+    image: big-data-project-flink-py:1.19.1
+    environment:
+      API_URL: http://traffic-api:8000/events/next
+      ROADS_URL: http://traffic-api:8000/roads
+      KAFKA_BOOTSTRAP: kafka:29092
+      KAFKA_TOPIC: trafic.raw_events
+      POLL_INTERVAL_MS: "1000"
+    depends_on:
+      traffic-api:
+        condition: service_healthy
+      kafka-topic-init:
+        condition: service_completed_successfully
+      flink-enrich-job-submitter:
+        condition: service_completed_successfully
+      flink-jobmanager:
+        condition: service_started
+      flink-taskmanager:
+        condition: service_started
+    command:
+      - bash
+      - -lc
+      - for i in {1..60}; do flink list -m flink-jobmanager:8081 >/dev/null 2>&1 && break; sleep 2; done; flink run -d -m flink-jobmanager:8081 -py /opt/flink/jobs/api_to_kafka.py
+    restart: "no"
+
+  flink-enrich-job-submitter:
+    image: big-data-project-flink-py:1.19.1
+    environment:
+      KAFKA_BOOTSTRAP: kafka:29092
+      RAW_TOPIC: trafic.raw_events
+      ENRICHED_TOPIC: trafic.enriched_events
+      KAFKA_GROUP_ID: traffic-raw-to-enriched
+    depends_on:
+      kafka-topic-init:
+        condition: service_completed_successfully
+      flink-jobmanager:
+        condition: service_started
+      flink-taskmanager:
+        condition: service_started
+    command:
+      - bash
+      - -lc
+      - for i in {1..60}; do flink list -m flink-jobmanager:8081 >/dev/null 2>&1 && break; sleep 2; done; flink run -d -m flink-jobmanager:8081 -C file:///opt/flink/lib/flink-sql-connector-kafka-3.2.0-1.19.jar -py /opt/flink/jobs/raw_to_enriched.py
+    restart: "no"
