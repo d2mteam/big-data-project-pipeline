@@ -134,10 +134,27 @@ services:
       retries: 12
     restart: unless-stopped
 
+  airflow-postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - airflow-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U airflow -d airflow" ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
   airflow:
     build:
       context: ./airflow
     depends_on:
+      airflow-postgres:
+        condition: service_healthy
       kafka-topic-init:
         condition: service_completed_successfully
       minio-init:
@@ -148,8 +165,12 @@ services:
         condition: service_healthy
     environment:
       AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
-      AIRFLOW__CORE__EXECUTOR: SequentialExecutor
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__MAX_ACTIVE_RUNS_PER_DAG: "1"
+      AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAG: "4"
+      AIRFLOW__CORE__PARALLELISM: "8"
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres:5432/airflow
       AIRFLOW__SCHEDULER__DAG_DIR_LIST_INTERVAL: "30"
       AIRFLOW__SCHEDULER__MIN_FILE_PROCESS_INTERVAL: "30"
       AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
@@ -294,6 +315,7 @@ services:
 
 volumes:
   airflow-logs:
+  airflow-postgres-data:
   mlflow-data:
   minio-data:
   redis-data:
