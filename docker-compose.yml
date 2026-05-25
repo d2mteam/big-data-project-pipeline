@@ -42,7 +42,7 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
-      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
     healthcheck:
       test: [ "CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092 >/dev/null 2>&1" ]
       interval: 10s
@@ -57,7 +57,7 @@ services:
     command:
       - bash
       - -lc
-      - kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic trafic.raw_events --partitions 3 --replication-factor 1 && kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic trafic.enriched_events --partitions 3 --replication-factor 1 && kafka-topics --bootstrap-server kafka:29092 --describe --topic trafic.raw_events && kafka-topics --bootstrap-server kafka:29092 --describe --topic trafic.enriched_events
+      - kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic trafic.raw_events --partitions 3 --replication-factor 1 && kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic trafic.enriched_events --partitions 3 --replication-factor 1 && kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic trafic.predictions --partitions 3 --replication-factor 1 && kafka-topics --bootstrap-server kafka:29092 --describe --topic trafic.raw_events && kafka-topics --bootstrap-server kafka:29092 --describe --topic trafic.enriched_events && kafka-topics --bootstrap-server kafka:29092 --describe --topic trafic.predictions
     restart: "no"
 
   redpanda-console:
@@ -292,6 +292,72 @@ services:
         exec airflow webserver
     restart: unless-stopped
 
+  airflow-train-model-once:
+    build:
+      context: ./airflow
+    depends_on:
+      airflow:
+        condition: service_started
+      traffic-producer:
+        condition: service_started
+      flink-enrich-job-submitter:
+        condition: service_completed_successfully
+      trino:
+        condition: service_healthy
+      mlflow:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres:5432/airflow
+      KAFKA_BOOTSTRAP: kafka:29092
+      KAFKA_TOPIC: trafic.enriched_events
+      KAFKA_GROUP_ID: airflow-iceberg-offset-reader
+      LOCAL_TIMEZONE: Asia/Ho_Chi_Minh
+      TRINO_HOST: trino
+      TRINO_PORT: "8080"
+      TRINO_USER: airflow
+      TRINO_ICEBERG_CATALOG: iceberg
+      TRINO_KAFKA_CATALOG: kafka
+      ICEBERG_SCHEMA: traffic
+      ICEBERG_ENRICHED_TABLE: enriched_events
+      ICEBERG_LONGTERM_TABLE: longterm_features
+      ICEBERG_TRAINING_TABLE: training_kmeans_30m
+      ICEBERG_INGEST_OFFSET_VARIABLE: iceberg_ingest_offsets__trafic_enriched_events
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MLFLOW_EXPERIMENT_NAME: traffic-state-kmeans-30m
+      KMEANS_MODEL_NAME: traffic_state_kmeans_30m
+      KMEANS_N_CLUSTERS: "3"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_DB: "0"
+      REDIS_TTL_SECONDS: "90000"
+      BOOTSTRAP_TRAIN_WAIT_SECONDS: "180"
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - airflow-logs:/opt/airflow/logs
+      - ./airflow/plugins:/opt/airflow/plugins
+      - ./airflow/config:/opt/airflow/config
+    command:
+      - bash
+      - -lc
+      - |
+        airflow db check
+        for i in {1..60}; do
+          airflow dags list | grep -q "train_traffic_kmeans_30m" && break
+          sleep 2
+        done
+        echo "Waiting $${BOOTSTRAP_TRAIN_WAIT_SECONDS}s for producer/Flink enriched events..."
+        sleep "$${BOOTSTRAP_TRAIN_WAIT_SECONDS}"
+        logical_date="$$(date -u +%Y-%m-%dT%H:%M:%S)"
+        airflow dags test kafka_enriched_to_iceberg "$${logical_date}"
+        airflow dags test compute_longterm_features "$${logical_date}"
+        airflow dags test train_traffic_kmeans_30m "$${logical_date}"
+    restart: "no"
+
   flink-jobmanager:
     build:
       context: ./flink
@@ -356,7 +422,6 @@ services:
 
   flink-predict-job-submitter:
     image: big-data-project-flink-py:1.19.1
-    profiles: [ "prediction" ]
     environment:
       KAFKA_BOOTSTRAP: kafka:29092
       ENRICHED_TOPIC: trafic.enriched_events
@@ -382,7 +447,7 @@ services:
     command:
       - bash
       - -lc
-      - for i in {1..60}; do flink list -m flink-jobmanager:8081 >/dev/null 2>&1 && break; sleep 2; done; flink run -d -m flink-jobmanager:8081 -C file:///opt/flink/lib/flink-sql-connector-kafka-3.2.0-1.19.jar -py /opt/flink/jobs/enriched_to_predictions.py
+      - for i in {1..60}; do flink list -m flink-jobmanager:8081 >/dev/null 2>&1 && break; sleep 2; done; if flink list -r -m flink-jobmanager:8081 | grep -q "enriched-to-kmeans-state-prediction-30m"; then echo "Prediction job already running"; else flink run -d -m flink-jobmanager:8081 -C file:///opt/flink/lib/flink-sql-connector-kafka-3.2.0-1.19.jar -py /opt/flink/jobs/enriched_to_predictions.py; fi
     restart: "no"
 
 volumes:
