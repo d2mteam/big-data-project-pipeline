@@ -11,7 +11,7 @@ from pyflink.datastream.connectors.kafka import (
     KafkaSink,
     KafkaSource,
 )
-from pyflink.datastream.functions import KeyedProcessFunction
+from pyflink.datastream.functions import KeyedProcessFunction, ProcessWindowFunction
 from pyflink.datastream.state import ListStateDescriptor
 
 
@@ -44,7 +44,7 @@ def main():
             return None
         return sum(values) / len(values)
 
-    class EnrichWithHistory(KeyedProcessFunction):
+    class AddLagFeaturesWithState(KeyedProcessFunction):
         def open(self, runtime_context):
             self.history = runtime_context.get_list_state(
                 ListStateDescriptor("last_3_events", Types.STRING())
@@ -57,7 +57,6 @@ def main():
             prev_1 = history[-1] if len(history) >= 1 else None
             prev_2 = history[-2] if len(history) >= 2 else None
             prev_3 = history[-3] if len(history) >= 3 else None
-            rolling_records = history[-2:] + [event]
 
             enriched = dict(event)
             enriched["prev_avg_speed_1"] = num(prev_1, "avg_speed")
@@ -69,11 +68,6 @@ def main():
             enriched["prev_delay_1"] = num(prev_1, "avg_delay_minutes")
             enriched["prev_delay_2"] = num(prev_2, "avg_delay_minutes")
             enriched["prev_delay_3"] = num(prev_3, "avg_delay_minutes")
-            enriched["rolling_avg_speed_3"] = avg(rolling_records, "avg_speed")
-            enriched["rolling_vehicle_count_3"] = avg(
-                rolling_records, "vehicle_count"
-            )
-            enriched["rolling_delay_3"] = avg(rolling_records, "avg_delay_minutes")
 
             next_history = (history + [event])[-3:]
             self.history.update(
@@ -82,6 +76,18 @@ def main():
                     for item in next_history
                 ]
             )
+
+            yield json.dumps(enriched, ensure_ascii=False, separators=(",", ":"))
+
+    class AddRollingFeaturesWithWindow(ProcessWindowFunction):
+        def process(self, key, context, elements):
+            records = [json.loads(item) for item in elements]
+            records.sort(key=lambda record: record.get("timestamp", ""))
+
+            enriched = dict(records[-1])
+            enriched["rolling_avg_speed_3"] = avg(records, "avg_speed")
+            enriched["rolling_vehicle_count_3"] = avg(records, "vehicle_count")
+            enriched["rolling_delay_3"] = avg(records, "avg_delay_minutes")
 
             yield json.dumps(enriched, ensure_ascii=False, separators=(",", ":"))
 
@@ -119,8 +125,15 @@ def main():
         Types.STRING(),
     )
 
-    enriched_events = raw_events.key_by(route_key, key_type=Types.STRING()).process(
-        EnrichWithHistory(),
+    events_with_lag = raw_events.key_by(route_key, key_type=Types.STRING()).process(
+        AddLagFeaturesWithState(),
+        output_type=Types.STRING(),
+    )
+
+    enriched_events = events_with_lag.key_by(
+        route_key, key_type=Types.STRING()
+    ).count_window(3, 1).process(
+        AddRollingFeaturesWithWindow(),
         output_type=Types.STRING(),
     )
 
