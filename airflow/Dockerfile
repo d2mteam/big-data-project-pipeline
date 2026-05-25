@@ -7,4 +7,5 @@ RUN pip install --no-cache-dir \
     pandas==2.1.4 \
     protobuf==4.25.6 \
     redis==5.2.1 \
-    scikit-learn==1.5.2
+    scikit-learn==1.5.2 \
+    trino==0.336.0

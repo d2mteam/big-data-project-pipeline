@@ -116,13 +116,14 @@ def dump_predictions_to_minio(**context):
 
 with DAG(
     dag_id="kafka_predictions_to_minio_parquet",
-    description="Dump daily trafic.predictions from Kafka to MinIO as Parquet.",
+    description="Disabled while prediction path is being redesigned.",
     start_date=datetime(2026, 1, 1, tzinfo=LOCAL_TIMEZONE),
-    schedule="59 23 * * *",
+    schedule=None,
     catchup=False,
+    is_paused_upon_creation=True,
     max_active_runs=1,
     dagrun_timeout=timedelta(minutes=10),
-    tags=["traffic", "predictions", "kafka", "minio", "parquet"],
+    tags=["traffic", "predictions", "disabled"],
 ) as dag:
     PythonOperator(
         task_id="dump_predictions_to_minio",

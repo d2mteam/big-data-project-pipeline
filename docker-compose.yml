@@ -57,7 +57,7 @@ services:
     command:
       - bash
       - -lc
-      - kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic trafic.raw_events --partitions 3 --replication-factor 1 && kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic trafic.enriched_events --partitions 3 --replication-factor 1 && kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic trafic.predictions --partitions 3 --replication-factor 1 && kafka-topics --bootstrap-server kafka:29092 --describe --topic trafic.raw_events && kafka-topics --bootstrap-server kafka:29092 --describe --topic trafic.enriched_events && kafka-topics --bootstrap-server kafka:29092 --describe --topic trafic.predictions
+      - kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic trafic.raw_events --partitions 3 --replication-factor 1 && kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic trafic.enriched_events --partitions 3 --replication-factor 1 && kafka-topics --bootstrap-server kafka:29092 --describe --topic trafic.raw_events && kafka-topics --bootstrap-server kafka:29092 --describe --topic trafic.enriched_events
     restart: "no"
 
   redpanda-console:
@@ -107,6 +107,65 @@ services:
       - -c
       - until mc alias set local http://minio:9000 minioadmin minioadmin; do sleep 2; done; mc mb --ignore-existing local/traffic-lake
     restart: "no"
+
+  iceberg-postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: iceberg
+      POSTGRES_PASSWORD: iceberg
+      POSTGRES_DB: iceberg
+    volumes:
+      - iceberg-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U iceberg -d iceberg" ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  iceberg-rest:
+    image: tabulario/iceberg-rest:1.6.0
+    depends_on:
+      iceberg-postgres:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_REGION: us-east-1
+      CATALOG_WAREHOUSE: s3://traffic-lake/warehouse
+      CATALOG_CATALOG__IMPL: org.apache.iceberg.jdbc.JdbcCatalog
+      CATALOG_URI: jdbc:postgresql://iceberg-postgres:5432/iceberg
+      CATALOG_JDBC_USER: iceberg
+      CATALOG_JDBC_PASSWORD: iceberg
+      CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO
+      CATALOG_S3_ENDPOINT: http://minio:9000
+      CATALOG_S3_PATH__STYLE__ACCESS: "true"
+    ports:
+      - "18181:8181"
+    restart: unless-stopped
+
+  trino:
+    image: trinodb/trino:455
+    depends_on:
+      kafka-topic-init:
+        condition: service_completed_successfully
+      iceberg-rest:
+        condition: service_started
+      minio-init:
+        condition: service_completed_successfully
+    volumes:
+      - ./trino/catalog:/etc/trino/catalog:ro
+      - ./trino/kafka:/etc/trino/kafka:ro
+    ports:
+      - "18083:8080"
+    healthcheck:
+      test: [ "CMD-SHELL", "trino --execute 'SELECT 1' >/dev/null 2>&1" ]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+    restart: unless-stopped
 
   mlflow:
     build:
@@ -163,6 +222,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      trino:
+        condition: service_healthy
     environment:
       AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
@@ -179,7 +240,7 @@ services:
       AIRFLOW_ADMIN_EMAIL: admin@example.com
       KAFKA_BOOTSTRAP: kafka:29092
       KAFKA_TOPIC: trafic.enriched_events
-      KAFKA_GROUP_ID: airflow-minio-parquet-sink
+      KAFKA_GROUP_ID: airflow-iceberg-offset-reader
       KAFKA_CONSUME_SECONDS: "45"
       KAFKA_MAX_RECORDS: "5000"
       MINIO_ENDPOINT: http://minio:9000
@@ -190,6 +251,16 @@ services:
       LOCAL_TIMEZONE: Asia/Ho_Chi_Minh
       LONGTERM_FEATURE_PREFIX: traffic/longterm_features/staging
       TRAINING_DATASET_PREFIX: traffic/training_datasets/kmeans_30m
+      TRINO_HOST: trino
+      TRINO_PORT: "8080"
+      TRINO_USER: airflow
+      TRINO_ICEBERG_CATALOG: iceberg
+      TRINO_KAFKA_CATALOG: kafka
+      ICEBERG_SCHEMA: traffic
+      ICEBERG_ENRICHED_TABLE: enriched_events
+      ICEBERG_LONGTERM_TABLE: longterm_features
+      ICEBERG_TRAINING_TABLE: training_kmeans_30m
+      ICEBERG_INGEST_OFFSET_VARIABLE: iceberg_ingest_offsets__trafic_enriched_events
       MLFLOW_TRACKING_URI: http://mlflow:5000
       MLFLOW_EXPERIMENT_NAME: traffic-state-kmeans-30m
       KMEANS_MODEL_NAME: traffic_state_kmeans_30m
@@ -285,6 +356,7 @@ services:
 
   flink-predict-job-submitter:
     image: big-data-project-flink-py:1.19.1
+    profiles: [ "prediction" ]
     environment:
       KAFKA_BOOTSTRAP: kafka:29092
       ENRICHED_TOPIC: trafic.enriched_events
@@ -316,6 +388,7 @@ services:
 volumes:
   airflow-logs:
   airflow-postgres-data:
+  iceberg-postgres-data:
   mlflow-data:
   minio-data:
   redis-data:
