@@ -32,15 +32,19 @@ LOCAL_TIMEZONE = ZoneInfo(os.getenv("LOCAL_TIMEZONE", "Asia/Ho_Chi_Minh"))
 
 
 def flatten_prediction(record):
-    predictions = record.get("predictions") or {}
+    prediction = record.get("prediction_30m") or {}
     return {
         "road_name": record.get("road_name"),
         "district": record.get("district"),
         "city": record.get("city"),
         "timestamp": record.get("timestamp"),
-        "target_15m": predictions.get("target_15m"),
-        "target_30m": predictions.get("target_30m"),
-        "target_60m": predictions.get("target_60m"),
+        "forecast_horizon_minutes": 30,
+        "current_cluster": prediction.get("current_cluster"),
+        "predicted_cluster": prediction.get("predicted_cluster"),
+        "traffic_status": prediction.get("traffic_status"),
+        "expected_avg_speed": prediction.get("expected_avg_speed"),
+        "expected_avg_delay_minutes": prediction.get("expected_avg_delay_minutes"),
+        "model_status": prediction.get("model_status"),
     }
 
 

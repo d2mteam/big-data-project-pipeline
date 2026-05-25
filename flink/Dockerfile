@@ -6,13 +6,16 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends python3 python3-pip \
     && ln -sf /usr/bin/python3 /usr/bin/python \
     && pip3 install --no-cache-dir \
-        apache-beam==2.48.0 \
-        avro-python3==1.10.2 \
-        kafka-python==2.0.2 \
-        protobuf==3.20.3 \
-        redis==5.2.1 \
-        requests==2.32.3 \
-        ruamel.yaml==0.18.6 \
+    apache-beam==2.48.0 \
+    avro-python3==1.10.2 \
+    kafka-python==2.0.2 \
+    mlflow==2.19.0 \
+    pandas==2.2.3 \
+    protobuf==3.20.3 \
+    redis==5.2.1 \
+    requests==2.32.3 \
+    ruamel.yaml==0.18.6 \
+    scikit-learn==1.5.2 \
     && rm -rf /var/lib/apt/lists/*
 
 ADD https://repo.maven.apache.org/maven2/org/apache/flink/flink-sql-connector-kafka/3.2.0-1.19/flink-sql-connector-kafka-3.2.0-1.19.jar /opt/flink/lib/

@@ -3,8 +3,8 @@ services:
     build:
       context: ./flink
     image: big-data-project-flink-py:1.19.1
-    command: ["true"]
-    profiles: ["build-only"]
+    command: [ "true" ]
+    profiles: [ "build-only" ]
 
   traffic-api:
     build:
@@ -18,13 +18,7 @@ services:
     ports:
       - "18000:8000"
     healthcheck:
-      test:
-        [
-          "CMD",
-          "python",
-          "-c",
-          "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)",
-        ]
+      test: [ "CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)" ]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -50,11 +44,7 @@ services:
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
     healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "kafka-broker-api-versions --bootstrap-server localhost:9092 >/dev/null 2>&1",
-        ]
+      test: [ "CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092 >/dev/null 2>&1" ]
       interval: 10s
       timeout: 10s
       retries: 12
@@ -89,7 +79,7 @@ services:
     volumes:
       - redis-data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: [ "CMD", "redis-cli", "ping" ]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -112,11 +102,37 @@ services:
     image: minio/mc:RELEASE.2025-04-16T18-13-26Z
     depends_on:
       - minio
-    entrypoint: ["/bin/sh"]
+    entrypoint: [ "/bin/sh" ]
     command:
       - -c
       - until mc alias set local http://minio:9000 minioadmin minioadmin; do sleep 2; done; mc mb --ignore-existing local/traffic-lake
     restart: "no"
+
+  mlflow:
+    build:
+      context: ./mlflow
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_DEFAULT_REGION: us-east-1
+      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
+    volumes:
+      - mlflow-data:/mlflow
+    ports:
+      - "15000:5000"
+    command:
+      - sh
+      - -c
+      - mkdir -p /mlflow/db && exec mlflow server --host 0.0.0.0 --port 5000 --backend-store-uri sqlite:////mlflow/db/mlflow.db --serve-artifacts --artifacts-destination s3://traffic-lake/mlflow-artifacts
+    healthcheck:
+      test: [ "CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health', timeout=2)" ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
 
   airflow:
     build:
@@ -126,6 +142,8 @@ services:
         condition: service_completed_successfully
       minio-init:
         condition: service_completed_successfully
+      mlflow:
+        condition: service_healthy
       redis:
         condition: service_healthy
     environment:
@@ -150,6 +168,11 @@ services:
       MINIO_PREFIX: traffic/enriched_events
       LOCAL_TIMEZONE: Asia/Ho_Chi_Minh
       LONGTERM_FEATURE_PREFIX: traffic/longterm_features/staging
+      TRAINING_DATASET_PREFIX: traffic/training_datasets/kmeans_30m
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MLFLOW_EXPERIMENT_NAME: traffic-state-kmeans-30m
+      KMEANS_MODEL_NAME: traffic_state_kmeans_30m
+      KMEANS_N_CLUSTERS: "3"
       REDIS_HOST: redis
       REDIS_PORT: "6379"
       REDIS_DB: "0"
@@ -249,10 +272,15 @@ services:
       REDIS_HOST: redis
       REDIS_PORT: "6379"
       REDIS_DB: "0"
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      KMEANS_MODEL_NAME: traffic_state_kmeans_30m
+      MODEL_REFRESH_RECORDS: "300"
     depends_on:
       kafka-topic-init:
         condition: service_completed_successfully
       redis:
+        condition: service_healthy
+      mlflow:
         condition: service_healthy
       flink-jobmanager:
         condition: service_started
@@ -266,5 +294,6 @@ services:
 
 volumes:
   airflow-logs:
+  mlflow-data:
   minio-data:
   redis-data:
