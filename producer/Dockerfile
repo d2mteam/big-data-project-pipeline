@@ -2,8 +2,8 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-RUN pip install --no-cache-dir requests kafka-python
+RUN pip install --no-cache-dir fastapi kafka-python requests uvicorn
 
-COPY producer.py .
+COPY *.py .
 
-CMD ["python", "producer.py"]
+CMD ["python", "sensor_producer.py"]

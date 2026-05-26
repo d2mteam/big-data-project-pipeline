@@ -1,12 +1,13 @@
 import os
 import re
+import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import mlflow
 import mlflow.sklearn
 from airflow import DAG
-from airflow.exceptions import AirflowSkipException
+from airflow.exceptions import AirflowException
 from airflow.operators.python import PythonOperator
 from mlflow import MlflowClient
 from mlflow.models import infer_signature
@@ -35,6 +36,9 @@ MLFLOW_EXPERIMENT_NAME = os.getenv(
 MODEL_NAME = os.getenv("KMEANS_MODEL_NAME", "traffic_state_kmeans_30m")
 N_CLUSTERS = int(os.getenv("KMEANS_N_CLUSTERS", "3"))
 LOCAL_TIMEZONE = ZoneInfo(os.getenv("LOCAL_TIMEZONE", "Asia/Ho_Chi_Minh"))
+MIN_TRAIN_ROWS = int(os.getenv("KMEANS_MIN_TRAIN_ROWS", "50"))
+WAIT_TIMEOUT_SECONDS = int(os.getenv("KMEANS_WAIT_TIMEOUT_SECONDS", "180"))
+WAIT_POKE_SECONDS = int(os.getenv("KMEANS_WAIT_POKE_SECONDS", "5"))
 
 FEATURE_COLUMNS = [
     "vehicle_count",
@@ -79,15 +83,77 @@ def safe_name(value):
     return re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip("-") or "run"
 
 
+def get_joinable_training_row_count():
+    return fetch_trino_value(
+        f"""
+        SELECT count(*)
+        FROM {ENRICHED_FQN} e
+        JOIN {LONGTERM_FQN} f
+          ON f.road_name = e.road_name
+         AND f.district = e.district
+         AND f.city = e.city
+         AND cast(f.hour AS INTEGER) = cast(e.hour AS INTEGER)
+         AND cast(f.day_of_week AS INTEGER) = cast(e.day_of_week AS INTEGER)
+         AND f.source_cutoff <= e.event_ts
+        WHERE e.event_ts IS NOT NULL
+        """
+    )
+
+
+def wait_for_training_data():
+    ensure_iceberg_tables()
+    required_rows = max(MIN_TRAIN_ROWS, N_CLUSTERS)
+    deadline = time.monotonic() + WAIT_TIMEOUT_SECONDS
+
+    while True:
+        try:
+            enriched_count = fetch_trino_value(f"SELECT count(*) FROM {ENRICHED_FQN}") or 0
+            longterm_count = fetch_trino_value(f"SELECT count(*) FROM {LONGTERM_FQN}") or 0
+            joinable_count = get_joinable_training_row_count() or 0
+        except Exception as error:
+            enriched_count = 0
+            longterm_count = 0
+            joinable_count = 0
+            print(f"Training data readiness query failed; will retry: {error}")
+
+        print(
+            "Training data readiness: "
+            f"enriched={enriched_count}, "
+            f"longterm={longterm_count}, "
+            f"joinable={joinable_count}, "
+            f"required_joinable={required_rows}"
+        )
+
+        if enriched_count > 0 and longterm_count > 0 and joinable_count >= required_rows:
+            return {
+                "enriched_rows": int(enriched_count),
+                "longterm_rows": int(longterm_count),
+                "joinable_rows": int(joinable_count),
+                "required_rows": int(required_rows),
+            }
+
+        if time.monotonic() >= deadline:
+            raise AirflowException(
+                "Timed out waiting for enough KMeans training data: "
+                f"enriched={enriched_count}, "
+                f"longterm={longterm_count}, "
+                f"joinable={joinable_count}, "
+                f"required_joinable={required_rows}, "
+                f"timeout_seconds={WAIT_TIMEOUT_SECONDS}"
+            )
+
+        time.sleep(WAIT_POKE_SECONDS)
+
+
 def build_training_dataset(**context):
     ensure_iceberg_tables()
     enriched_count = fetch_trino_value(f"SELECT count(*) FROM {ENRICHED_FQN}")
     if not enriched_count:
-        raise AirflowSkipException("No Iceberg enriched events are available.")
+        raise AirflowException("No Iceberg enriched events are available.")
 
     longterm_count = fetch_trino_value(f"SELECT count(*) FROM {LONGTERM_FQN}")
     if not longterm_count:
-        raise AirflowSkipException("No Iceberg long-term features are available.")
+        raise AirflowException("No Iceberg long-term features are available.")
 
     training_run_id = safe_name(context["run_id"])
     run_trino(
@@ -230,7 +296,7 @@ def build_training_dataset(**context):
         """
     )
     if row_count < N_CLUSTERS:
-        raise AirflowSkipException("Not enough records to train KMeans.")
+        raise AirflowException("Not enough records to train KMeans.")
 
     print(f"Wrote {row_count} training rows to {TRAINING_FQN}.")
     return training_run_id
@@ -239,7 +305,7 @@ def build_training_dataset(**context):
 def train_kmeans_30m(**context):
     training_run_id = context["ti"].xcom_pull(task_ids="build_training_dataset")
     if not training_run_id:
-        raise AirflowSkipException("Training dataset was not generated.")
+        raise AirflowException("Training dataset was not generated.")
 
     dataset = fetch_trino_dataframe(
         f"""
@@ -250,7 +316,7 @@ def train_kmeans_30m(**context):
         """
     )
     if len(dataset) < N_CLUSTERS:
-        raise AirflowSkipException("Not enough records to train KMeans.")
+        raise AirflowException("Not enough records to train KMeans.")
 
     features = dataset[FEATURE_COLUMNS]
     model = Pipeline(
@@ -298,7 +364,7 @@ def train_kmeans_30m(**context):
         how="inner",
     )
     if transitions.empty:
-        raise AirflowSkipException("No 30-minute transitions are available for training.")
+        raise AirflowException("No 30-minute transitions are available for training.")
 
     counts = (
         transitions.groupby(["cluster", "future_cluster"])
@@ -373,6 +439,10 @@ with DAG(
     dagrun_timeout=timedelta(minutes=30),
     tags=["traffic", "training", "kmeans", "mlflow", "30m", "iceberg", "trino"],
 ) as dag:
+    wait_for_data_task = PythonOperator(
+        task_id="wait_for_training_data",
+        python_callable=wait_for_training_data,
+    )
     build_dataset_task = PythonOperator(
         task_id="build_training_dataset",
         python_callable=build_training_dataset,
@@ -381,4 +451,4 @@ with DAG(
         task_id="train_kmeans_30m",
         python_callable=train_kmeans_30m,
     )
-    build_dataset_task >> train_task
+    wait_for_data_task >> build_dataset_task >> train_task

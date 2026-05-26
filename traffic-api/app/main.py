@@ -20,7 +20,31 @@ _records: list[dict[str, Any]] = []
 _records_by_route: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
 _routes: list[dict[str, Any]] = []
 _route_cursors: dict[tuple[str, str, str], int] = {}
+_route_cursors_traffic: dict[tuple[str, str, str], int] = {}
+_route_cursors_vehicles: dict[tuple[str, str, str], int] = {}
+_route_cursors_weather: dict[tuple[str, str, str], int] = {}
+_district_cursors_weather: dict[tuple[str, str], int] = {}
 _lock = Lock()
+
+TRAFFIC_FIELDS = {
+    "timestamp", "road_name", "district", "city", "latitude", "longitude",
+    "vehicle_count", "avg_speed", "min_speed", "max_speed", "avg_delay_minutes",
+    "hour", "day_of_week", "is_weekend", "is_peak_hour",
+}
+VEHICLE_FIELDS = {
+    "road_name", "district", "city",
+    "truck_count", "bus_count", "motorbike_count", "car_count", "taxi_count",
+    "truck_ratio", "bus_ratio", "motorbike_ratio", "car_ratio", "taxi_ratio",
+}
+WEATHER_FIELDS = {
+    "road_name", "district", "city",
+    "accident_count", "temperature_celsius", "humidity_percentage",
+    "weather_condition", "is_rain",
+}
+WEATHER_DISTRICT_FIELDS = {
+    "accident_count", "temperature_celsius", "humidity_percentage",
+    "weather_condition", "is_rain",
+}
 
 DERIVED_STREAM_OR_TRAINING_FIELDS = {
     "prev_avg_speed_1",
@@ -71,6 +95,9 @@ def _index_records(records: list[dict[str, Any]]) -> None:
     _records_by_route.clear()
     _routes.clear()
     _route_cursors.clear()
+    _route_cursors_traffic.clear()
+    _route_cursors_vehicles.clear()
+    _route_cursors_weather.clear()
 
     route_seen: set[tuple[str, str, str]] = set()
     for record in records:
@@ -89,6 +116,8 @@ def _index_records(records: list[dict[str, Any]]) -> None:
                     "display_city": record["city"],
                 }
             )
+
+    _district_cursors_weather.clear()
 
     for route_records in _records_by_route.values():
         route_records.sort(key=lambda item: item["timestamp"])
@@ -117,8 +146,12 @@ def roads() -> list[dict[str, Any]]:
     return _routes
 
 
-@app.get("/events/next")
-def next_event(road_name: str, district: str, city: str) -> dict[str, Any]:
+def _fetch_next_record(
+    road_name: str,
+    district: str,
+    city: str,
+    cursors: dict[tuple[str, str, str], int],
+) -> tuple[dict[str, Any], datetime]:
     if not _records:
         raise HTTPException(status_code=503, detail="Traffic data is not loaded")
 
@@ -128,18 +161,69 @@ def next_event(road_name: str, district: str, city: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail=f"Route not found: {route_key}")
 
     with _lock:
-        route_index = _route_cursors.get(route_key, 0)
-        _route_cursors[route_key] = route_index + 1
+        route_index = cursors.get(route_key, 0)
+        cursors[route_key] = route_index + 1
 
     record = dict(route_records[route_index % len(route_records)])
     for field in DERIVED_STREAM_OR_TRAINING_FIELDS:
         record.pop(field, None)
 
     timestamp = BASE_TIME + timedelta(minutes=STEP_MINUTES * route_index)
+    return record, timestamp
+
+
+@app.get("/events/next")
+def next_event(road_name: str, district: str, city: str) -> dict[str, Any]:
+    record, timestamp = _fetch_next_record(road_name, district, city, _route_cursors)
     record["timestamp"] = timestamp.strftime("%Y-%m-%dT%H:%M:%S")
     record["hour"] = timestamp.hour
     record["day_of_week"] = timestamp.weekday()
     record["is_weekend"] = int(timestamp.weekday() >= 5)
     record["is_peak_hour"] = int(7 <= timestamp.hour <= 9 or 16 <= timestamp.hour <= 19)
-
     return record
+
+
+@app.get("/events/traffic")
+def traffic_event(road_name: str, district: str, city: str) -> dict[str, Any]:
+    record, timestamp = _fetch_next_record(road_name, district, city, _route_cursors_traffic)
+    record["timestamp"] = timestamp.strftime("%Y-%m-%dT%H:%M:%S")
+    record["hour"] = timestamp.hour
+    record["day_of_week"] = timestamp.weekday()
+    record["is_weekend"] = int(timestamp.weekday() >= 5)
+    record["is_peak_hour"] = int(7 <= timestamp.hour <= 9 or 16 <= timestamp.hour <= 19)
+    return {k: v for k, v in record.items() if k in TRAFFIC_FIELDS}
+
+
+@app.get("/events/vehicles")
+def vehicles_event(road_name: str, district: str, city: str) -> dict[str, Any]:
+    record, _ = _fetch_next_record(road_name, district, city, _route_cursors_vehicles)
+    return {k: v for k, v in record.items() if k in VEHICLE_FIELDS}
+
+
+@app.get("/events/weather")
+def weather_event(road_name: str, district: str, city: str) -> dict[str, Any]:
+    record, _ = _fetch_next_record(road_name, district, city, _route_cursors_weather)
+    return {k: v for k, v in record.items() if k in WEATHER_FIELDS}
+
+
+@app.get("/events/weather_district")
+def weather_district_event(district: str, city: str) -> dict[str, Any]:
+    district_slug = _slug(district)
+    city_slug = _slug(city)
+    matching = [k for k in _records_by_route if k[1] == district_slug and k[2] == city_slug]
+    if not matching:
+        raise HTTPException(status_code=404, detail=f"District not found: {district}, {city}")
+
+    route_key = matching[0]
+    district_key = (district_slug, city_slug)
+    route_records = _records_by_route[route_key]
+
+    with _lock:
+        idx = _district_cursors_weather.get(district_key, 0)
+        _district_cursors_weather[district_key] = idx + 1
+
+    record = dict(route_records[idx % len(route_records)])
+    result = {k: v for k, v in record.items() if k in WEATHER_DISTRICT_FIELDS}
+    result["district"] = record["district"]
+    result["city"] = record["city"]
+    return result

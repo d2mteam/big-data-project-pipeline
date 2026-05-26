@@ -57,7 +57,7 @@ services:
     command:
       - bash
       - -lc
-      - kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic trafic.raw_events --partitions 3 --replication-factor 1 && kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic trafic.enriched_events --partitions 3 --replication-factor 1 && kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic trafic.predictions --partitions 3 --replication-factor 1 && kafka-topics --bootstrap-server kafka:29092 --describe --topic trafic.raw_events && kafka-topics --bootstrap-server kafka:29092 --describe --topic trafic.enriched_events && kafka-topics --bootstrap-server kafka:29092 --describe --topic trafic.predictions
+      - kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic trafic.raw_sensor --partitions 3 --replication-factor 1 && kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic trafic.raw_weather --partitions 3 --replication-factor 1 && kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic trafic.enriched_events --partitions 3 --replication-factor 1 && kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic trafic.predictions --partitions 3 --replication-factor 1 && kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic trafic.congestion_alerts --partitions 3 --replication-factor 1 && kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic trafic.accident_anomaly_alerts --partitions 3 --replication-factor 1 && kafka-topics --bootstrap-server kafka:29092 --describe --topic trafic.raw_sensor && kafka-topics --bootstrap-server kafka:29092 --describe --topic trafic.raw_weather && kafka-topics --bootstrap-server kafka:29092 --describe --topic trafic.enriched_events && kafka-topics --bootstrap-server kafka:29092 --describe --topic trafic.predictions && kafka-topics --bootstrap-server kafka:29092 --describe --topic trafic.congestion_alerts && kafka-topics --bootstrap-server kafka:29092 --describe --topic trafic.accident_anomaly_alerts
     restart: "no"
 
   redpanda-console:
@@ -148,6 +148,8 @@ services:
 
   trino:
     image: trinodb/trino:455
+    mem_limit: 3g
+    memswap_limit: 3g
     depends_on:
       kafka-topic-init:
         condition: service_completed_successfully
@@ -265,6 +267,9 @@ services:
       MLFLOW_EXPERIMENT_NAME: traffic-state-kmeans-30m
       KMEANS_MODEL_NAME: traffic_state_kmeans_30m
       KMEANS_N_CLUSTERS: "3"
+      KMEANS_MIN_TRAIN_ROWS: "50"
+      KMEANS_WAIT_TIMEOUT_SECONDS: "180"
+      KMEANS_WAIT_POKE_SECONDS: "5"
       REDIS_HOST: redis
       REDIS_PORT: "6379"
       REDIS_DB: "0"
@@ -298,7 +303,7 @@ services:
     depends_on:
       airflow:
         condition: service_started
-      traffic-producer:
+      traffic-sensor-producer:
         condition: service_started
       flink-enrich-job-submitter:
         condition: service_completed_successfully
@@ -331,11 +336,14 @@ services:
       MLFLOW_EXPERIMENT_NAME: traffic-state-kmeans-30m
       KMEANS_MODEL_NAME: traffic_state_kmeans_30m
       KMEANS_N_CLUSTERS: "3"
+      KMEANS_MIN_TRAIN_ROWS: "50"
+      KMEANS_WAIT_TIMEOUT_SECONDS: "180"
+      KMEANS_WAIT_POKE_SECONDS: "5"
       REDIS_HOST: redis
       REDIS_PORT: "6379"
       REDIS_DB: "0"
       REDIS_TTL_SECONDS: "90000"
-      BOOTSTRAP_TRAIN_WAIT_SECONDS: "180"
+      BOOTSTRAP_TRAIN_WAIT_SECONDS: "60"
     volumes:
       - ./airflow/dags:/opt/airflow/dags
       - airflow-logs:/opt/airflow/logs
@@ -381,17 +389,17 @@ services:
     environment:
       FLINK_PROPERTIES: |
         jobmanager.rpc.address: flink-jobmanager
-        taskmanager.numberOfTaskSlots: 2
+        taskmanager.numberOfTaskSlots: 4
         parallelism.default: 1
 
-  traffic-producer:
+  traffic-sensor-producer:
     build:
       context: ./producer
+    command: ["python", "sensor_producer.py"]
     environment:
-      API_URL: http://traffic-api:8000/events/next
-      ROADS_URL: http://traffic-api:8000/roads
+      API_BASE_URL: http://traffic-api:8000
       KAFKA_BOOTSTRAP: kafka:29092
-      KAFKA_TOPIC: trafic.raw_events
+      KAFKA_TOPIC: trafic.raw_sensor
       POLL_INTERVAL_MS: "1000"
     depends_on:
       traffic-api:
@@ -400,11 +408,47 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
+  traffic-weather-producer:
+    build:
+      context: ./producer
+    command: ["python", "weather_producer.py"]
+    environment:
+      API_BASE_URL: http://traffic-api:8000
+      KAFKA_BOOTSTRAP: kafka:29092
+      KAFKA_TOPIC: trafic.raw_weather
+      POLL_INTERVAL_MS: "10000"
+    depends_on:
+      traffic-api:
+        condition: service_healthy
+      kafka-topic-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  traffic-anomaly-api:
+    build:
+      context: ./producer
+    command: ["uvicorn", "anomaly_api:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      KAFKA_BOOTSTRAP: kafka:29092
+      KAFKA_TOPIC: trafic.raw_sensor
+    ports:
+      - "18010:8000"
+    depends_on:
+      kafka-topic-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [ "CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)" ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
   flink-enrich-job-submitter:
     image: big-data-project-flink-py:1.19.1
     environment:
       KAFKA_BOOTSTRAP: kafka:29092
-      RAW_TOPIC: trafic.raw_events
+      SENSOR_TOPIC: trafic.raw_sensor
+      WEATHER_TOPIC: trafic.raw_weather
       ENRICHED_TOPIC: trafic.enriched_events
       KAFKA_GROUP_ID: traffic-raw-to-enriched
     depends_on:
@@ -417,7 +461,7 @@ services:
     command:
       - bash
       - -lc
-      - for i in {1..60}; do flink list -m flink-jobmanager:8081 >/dev/null 2>&1 && break; sleep 2; done; flink run -d -m flink-jobmanager:8081 -C file:///opt/flink/lib/flink-sql-connector-kafka-3.2.0-1.19.jar -py /opt/flink/jobs/raw_to_enriched.py
+      - for i in {1..60}; do flink list -m flink-jobmanager:8081 >/dev/null 2>&1 && break; sleep 2; done; if flink list -r -m flink-jobmanager:8081 | grep -q "raw-to-enriched-state-window"; then echo "Raw enrich job already running"; else flink run -d -m flink-jobmanager:8081 -C file:///opt/flink/lib/flink-sql-connector-kafka-3.2.0-1.19.jar -py /opt/flink/jobs/raw_to_enriched.py; fi
     restart: "no"
 
   flink-predict-job-submitter:
@@ -448,6 +492,51 @@ services:
       - bash
       - -lc
       - for i in {1..60}; do flink list -m flink-jobmanager:8081 >/dev/null 2>&1 && break; sleep 2; done; if flink list -r -m flink-jobmanager:8081 | grep -q "enriched-to-kmeans-state-prediction-30m"; then echo "Prediction job already running"; else flink run -d -m flink-jobmanager:8081 -C file:///opt/flink/lib/flink-sql-connector-kafka-3.2.0-1.19.jar -py /opt/flink/jobs/enriched_to_predictions.py; fi
+    restart: "no"
+
+  flink-congestion-cep-job-submitter:
+    image: big-data-project-flink-py:1.19.1
+    environment:
+      KAFKA_BOOTSTRAP: kafka:29092
+      ENRICHED_TOPIC: trafic.enriched_events
+      CONGESTION_ALERT_TOPIC: trafic.congestion_alerts
+      KAFKA_GROUP_ID: traffic-congestion-cep-alerts
+      CONGESTION_SPEED_THRESHOLD: "10"
+      CONGESTION_CONSECUTIVE_EVENTS: "3"
+      CONGESTION_DURATION_MINUTES: "30"
+    depends_on:
+      kafka-topic-init:
+        condition: service_completed_successfully
+      flink-jobmanager:
+        condition: service_started
+      flink-taskmanager:
+        condition: service_started
+    command:
+      - bash
+      - -lc
+      - for i in {1..60}; do flink list -m flink-jobmanager:8081 >/dev/null 2>&1 && break; sleep 2; done; if flink list -r -m flink-jobmanager:8081 | grep -q "congestion-cep-alerts"; then echo "Congestion CEP job already running"; else flink run -d -m flink-jobmanager:8081 -C file:///opt/flink/lib/flink-sql-connector-kafka-3.2.0-1.19.jar -py /opt/flink/jobs/congestion_cep_alerts.py; fi
+    restart: "no"
+
+  flink-accident-anomaly-job-submitter:
+    image: big-data-project-flink-py:1.19.1
+    environment:
+      KAFKA_BOOTSTRAP: kafka:29092
+      ENRICHED_TOPIC: trafic.enriched_events
+      ACCIDENT_ALERT_TOPIC: trafic.accident_anomaly_alerts
+      KAFKA_GROUP_ID: traffic-accident-anomaly-alerts
+      ACCIDENT_HISTORY_EVENTS: "6"
+      ACCIDENT_SPIKE_MULTIPLIER: "3"
+    depends_on:
+      kafka-topic-init:
+        condition: service_completed_successfully
+      flink-jobmanager:
+        condition: service_started
+      flink-taskmanager:
+        condition: service_started
+    command:
+      - bash
+      - -lc
+      - for i in {1..60}; do flink list -m flink-jobmanager:8081 >/dev/null 2>&1 && break; sleep 2; done; if flink list -r -m flink-jobmanager:8081 | grep -q "accident-anomaly-alerts"; then echo "Accident anomaly job already running"; else flink run -d -m flink-jobmanager:8081 -C file:///opt/flink/lib/flink-sql-connector-kafka-3.2.0-1.19.jar -py /opt/flink/jobs/accident_anomaly_alerts.py; fi
     restart: "no"
 
 volumes:
