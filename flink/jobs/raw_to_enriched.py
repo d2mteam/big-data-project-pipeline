@@ -11,11 +11,7 @@ from pyflink.datastream.connectors.kafka import (
     KafkaSink,
     KafkaSource,
 )
-from pyflink.datastream.functions import (
-    CoProcessFunction,
-    KeyedProcessFunction,
-    ProcessWindowFunction,
-)
+from pyflink.datastream.functions import CoProcessFunction, KeyedProcessFunction
 from pyflink.datastream.state import ListStateDescriptor, ValueStateDescriptor
 
 
@@ -72,7 +68,9 @@ def main():
         def process_element2(self, weather_value, ctx):
             self.weather_state.update(weather_value)
 
-    class AddLagFeaturesWithState(KeyedProcessFunction):
+    class EnrichWithLagAndRolling(KeyedProcessFunction):
+        """Lag features + rolling averages trong 1 operator — giảm 1 gRPC round-trip."""
+
         def open(self, runtime_context):
             self.history = runtime_context.get_list_state(
                 ListStateDescriptor("last_3_events", Types.STRING())
@@ -87,6 +85,8 @@ def main():
             prev_3 = history[-3] if len(history) >= 3 else None
 
             enriched = dict(event)
+
+            # Lag features
             enriched["prev_avg_speed_1"] = num(prev_1, "avg_speed")
             enriched["prev_avg_speed_2"] = num(prev_2, "avg_speed")
             enriched["prev_avg_speed_3"] = num(prev_3, "avg_speed")
@@ -97,6 +97,12 @@ def main():
             enriched["prev_delay_2"] = num(prev_2, "avg_delay_minutes")
             enriched["prev_delay_3"] = num(prev_3, "avg_delay_minutes")
 
+            # Rolling features trên window [prev_2, prev_1, current]
+            window = [r for r in [prev_2, prev_1, event] if r is not None]
+            enriched["rolling_avg_speed_3"] = avg(window, "avg_speed")
+            enriched["rolling_vehicle_count_3"] = avg(window, "vehicle_count")
+            enriched["rolling_delay_3"] = avg(window, "avg_delay_minutes")
+
             next_history = (history + [event])[-3:]
             self.history.update([
                 json.dumps(item, ensure_ascii=False, separators=(",", ":"))
@@ -105,20 +111,7 @@ def main():
 
             yield json.dumps(enriched, ensure_ascii=False, separators=(",", ":"))
 
-    class AddRollingFeaturesWithWindow(ProcessWindowFunction):
-        def process(self, key, context, elements):
-            records = [json.loads(item) for item in elements]
-            records.sort(key=lambda r: r.get("timestamp", ""))
-
-            enriched = dict(records[-1])
-            enriched["rolling_avg_speed_3"] = avg(records, "avg_speed")
-            enriched["rolling_vehicle_count_3"] = avg(records, "vehicle_count")
-            enriched["rolling_delay_3"] = avg(records, "avg_delay_minutes")
-
-            yield json.dumps(enriched, ensure_ascii=False, separators=(",", ":"))
-
     env = StreamExecutionEnvironment.get_execution_environment()
-    env.set_parallelism(1)
 
     sensor_source = (
         KafkaSource.builder()
@@ -173,15 +166,9 @@ def main():
         .process(JoinWeatherToSensor(), output_type=Types.STRING())
     )
 
-    events_with_lag = merged_stream.key_by(route_key, key_type=Types.STRING()).process(
-        AddLagFeaturesWithState(),
+    enriched_events = merged_stream.key_by(route_key, key_type=Types.STRING()).process(
+        EnrichWithLagAndRolling(),
         output_type=Types.STRING(),
-    )
-
-    enriched_events = (
-        events_with_lag.key_by(route_key, key_type=Types.STRING())
-        .count_window(3, 1)
-        .process(AddRollingFeaturesWithWindow(), output_type=Types.STRING())
     )
 
     enriched_events.sink_to(sink).name("enriched-events-kafka-sink")

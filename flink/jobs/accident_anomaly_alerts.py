@@ -76,7 +76,6 @@ def main():
             self.history.update(next_history)
 
     env = StreamExecutionEnvironment.get_execution_environment()
-    env.set_parallelism(1)
 
     source = (
         KafkaSource.builder()

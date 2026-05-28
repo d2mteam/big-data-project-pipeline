@@ -214,7 +214,6 @@ def main():
             yield json.dumps(output, ensure_ascii=False, separators=(",", ":"))
 
     env = StreamExecutionEnvironment.get_execution_environment()
-    env.set_parallelism(1)
     env.enable_checkpointing(10_000)
 
     source = (

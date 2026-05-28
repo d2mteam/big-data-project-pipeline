@@ -1,18 +1,40 @@
+import asyncio
 import json
 import os
-import time
 
-import requests
-from kafka import KafkaProducer
+import aiohttp
+from aiokafka import AIOKafkaProducer
 
 
-def main():
+async def fetch_district(
+    session: aiohttp.ClientSession, base_url: str, district: dict
+) -> dict | None:
+    timeout = aiohttp.ClientTimeout(total=5)
+    try:
+        async with session.get(
+            f"{base_url}/events/weather_district",
+            params={"district": district["district"], "city": district["city"]},
+            timeout=timeout,
+        ) as r:
+            r.raise_for_status()
+            return await r.json()
+    except Exception as e:
+        print(f"  weather error {district['district']}: {e}")
+        return None
+
+
+async def main():
     base_url = os.getenv("API_BASE_URL", "http://traffic-api:8000")
     kafka_bootstrap = os.getenv("KAFKA_BOOTSTRAP", "kafka:29092")
     kafka_topic = os.getenv("KAFKA_TOPIC", "trafic.raw_weather")
-    poll_interval = float(os.getenv("POLL_INTERVAL_MS", "10000")) / 1000
+    batch_interval = float(os.getenv("POLL_INTERVAL_MS", "10000")) / 1000
 
-    routes = requests.get(f"{base_url}/roads", timeout=10).json()
+    async with aiohttp.ClientSession() as session:
+        async with session.get(
+            f"{base_url}/roads", timeout=aiohttp.ClientTimeout(total=10)
+        ) as r:
+            routes = await r.json()
+
     if not routes:
         raise RuntimeError("No routes returned from traffic API")
 
@@ -24,32 +46,31 @@ def main():
             seen.add(key)
             districts.append({"district": r["district"], "city": r["city"]})
 
-    producer = KafkaProducer(
-        bootstrap_servers=kafka_bootstrap,
-        value_serializer=lambda v: json.dumps(v, ensure_ascii=False).encode("utf-8"),
-    )
+    kafka = AIOKafkaProducer(bootstrap_servers=kafka_bootstrap)
+    await kafka.start()
+    print(f"Weather producer: {len(districts)} districts, batch_interval={batch_interval}s")
 
-    print(f"Starting weather producer: {len(districts)} districts, interval={poll_interval}s")
-
-    tick = 0
-    while True:
-        d = districts[tick % len(districts)]
-        try:
-            resp = requests.get(
-                f"{base_url}/events/weather_district",
-                params={"district": d["district"], "city": d["city"]},
-                timeout=10,
-            )
-            resp.raise_for_status()
-            producer.send(kafka_topic, value=resp.json())
-            producer.flush()
-            print(f"[{tick}] weather sent: {d['district']}, {d['city']}")
-        except Exception as e:
-            print(f"[{tick}] error: {e}")
-
-        tick += 1
-        time.sleep(poll_interval)
+    try:
+        tick = 0
+        while True:
+            t0 = asyncio.get_event_loop().time()
+            async with aiohttp.ClientSession() as session:
+                events = await asyncio.gather(
+                    *[fetch_district(session, base_url, d) for d in districts]
+                )
+            sent = 0
+            for event in events:
+                if event is not None:
+                    await kafka.send(kafka_topic, json.dumps(event, ensure_ascii=False).encode())
+                    sent += 1
+            await kafka.flush()
+            elapsed = asyncio.get_event_loop().time() - t0
+            print(f"[{tick}] weather sent {sent}/{len(districts)} in {elapsed:.2f}s")
+            tick += 1
+            await asyncio.sleep(max(0.0, batch_interval - elapsed))
+    finally:
+        await kafka.stop()
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
