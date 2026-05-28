@@ -395,7 +395,7 @@ services:
   traffic-sensor-producer:
     build:
       context: ./producer
-    command: ["python", "sensor_producer.py"]
+    command: [ "python", "sensor_producer.py" ]
     environment:
       API_BASE_URL: http://traffic-api:8000
       KAFKA_BOOTSTRAP: kafka:29092
@@ -411,7 +411,7 @@ services:
   traffic-weather-producer:
     build:
       context: ./producer
-    command: ["python", "weather_producer.py"]
+    command: [ "python", "weather_producer.py" ]
     environment:
       API_BASE_URL: http://traffic-api:8000
       KAFKA_BOOTSTRAP: kafka:29092
@@ -427,7 +427,7 @@ services:
   traffic-anomaly-api:
     build:
       context: ./producer
-    command: ["uvicorn", "anomaly_api:app", "--host", "0.0.0.0", "--port", "8000"]
+    command: [ "uvicorn", "anomaly_api:app", "--host", "0.0.0.0", "--port", "8000" ]
     environment:
       KAFKA_BOOTSTRAP: kafka:29092
       KAFKA_TOPIC: trafic.raw_sensor
@@ -539,6 +539,116 @@ services:
       - for i in {1..60}; do flink list -m flink-jobmanager:8081 >/dev/null 2>&1 && break; sleep 2; done; if flink list -r -m flink-jobmanager:8081 | grep -q "accident-anomaly-alerts"; then echo "Accident anomaly job already running"; else flink run -d -m flink-jobmanager:8081 -C file:///opt/flink/lib/flink-sql-connector-kafka-3.2.0-1.19.jar -py /opt/flink/jobs/accident_anomaly_alerts.py; fi
     restart: "no"
 
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    hostname: clickhouse
+    ports:
+      - "18123:8123"
+    environment:
+      CLICKHOUSE_DB: traffic_analytics
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ""
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - ./clickhouse/init:/docker-entrypoint-initdb.d:ro
+    depends_on:
+      kafka-topic-init:
+        condition: service_completed_successfully
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: [ "CMD-SHELL", "clickhouse-client --query 'SELECT 1'" ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  superset-postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: superset
+      POSTGRES_PASSWORD: superset
+      POSTGRES_DB: superset
+    volumes:
+      - superset-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U superset -d superset" ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  superset:
+    build:
+      context: ./superset
+    depends_on:
+      superset-postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    environment:
+      SUPERSET_SECRET_KEY: "change-this-to-a-long-random-secret"
+      SQLALCHEMY_DATABASE_URI: postgresql+psycopg2://superset:superset@superset-postgres:5432/superset
+    volumes:
+      - ./superset/superset_config.py:/app/pythonpath/superset_config.py:ro
+      - superset-home:/app/superset_home
+    ports:
+      - "8088:8088"
+    command:
+      - sh
+      - -c
+      - |
+        superset run -h 0.0.0.0 -p 8088
+    restart: unless-stopped
+
+  superset-init:
+    build:
+      context: ./superset
+    depends_on:
+      superset-postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    environment:
+      SUPERSET_SECRET_KEY: "change-this-to-a-long-random-secret"
+      SQLALCHEMY_DATABASE_URI: postgresql+psycopg2://superset:superset@superset-postgres:5432/superset
+    volumes:
+      - ./superset/superset_config.py:/app/pythonpath/superset_config.py:ro
+      - superset-home:/app/superset_home
+    command:
+      - sh
+      - -c
+      - |
+        superset db upgrade &&
+        superset fab create-admin \
+          --username admin \
+          --firstname Superset \
+          --lastname Admin \
+          --email admin@example.com \
+          --password admin || true &&
+        superset init
+    restart: "no"
+  streamlit-alert:
+    build:
+      context: ./streamlit-alert
+    environment:
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: "8123"
+      CLICKHOUSE_DATABASE: traffic_analytics
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ""
+    ports:
+      - "8501:8501"
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      kafka-topic-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
 volumes:
   airflow-logs:
   airflow-postgres-data:
@@ -546,3 +656,6 @@ volumes:
   mlflow-data:
   minio-data:
   redis-data:
+  clickhouse-data:
+  superset-postgres-data:
+  superset-home:
