@@ -40,6 +40,10 @@ services:
       - registry-data:/var/lib/registry
     restart: unless-stopped
 
+    deploy:
+      placement:
+        constraints:
+          - node.label.role == streaming
   flink-python-base:
     build:
       context: ./flink
@@ -47,7 +51,12 @@ services:
     command: [ "true" ]
     profiles: [ "build-only" ]
 
+    deploy:
+      placement:
+        constraints:
+          - node.label.role == streaming
   traffic-api:
+    image: big-data-project-traffic-api:latest
     build:
       context: ./traffic-api
     environment:
@@ -66,6 +75,10 @@ services:
       timeout: 5s
       retries: 12
 
+    deploy:
+      placement:
+        constraints:
+          - node.label.role == streaming
   kafka:
     image: confluentinc/cp-kafka:7.7.1
     hostname: kafka
@@ -104,6 +117,10 @@ services:
       timeout: 10s
       retries: 12
 
+    deploy:
+      placement:
+        constraints:
+          - node.label.role == streaming
   kafka-topic-init:
     image: confluentinc/cp-kafka:7.7.1
     depends_on:
@@ -115,6 +132,10 @@ services:
       - kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic trafic.raw_sensor --partitions 6 --replication-factor 1 && kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic trafic.raw_weather --partitions 6 --replication-factor 1 && kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic trafic.enriched_events --partitions 6 --replication-factor 1 && kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic trafic.predictions --partitions 6 --replication-factor 1 && kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic trafic.congestion_alerts --partitions 6 --replication-factor 1 && kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic trafic.accident_anomaly_alerts --partitions 6 --replication-factor 1 && kafka-topics --bootstrap-server kafka:29092 --describe --topic trafic.raw_sensor && kafka-topics --bootstrap-server kafka:29092 --describe --topic trafic.raw_weather && kafka-topics --bootstrap-server kafka:29092 --describe --topic trafic.enriched_events && kafka-topics --bootstrap-server kafka:29092 --describe --topic trafic.predictions && kafka-topics --bootstrap-server kafka:29092 --describe --topic trafic.congestion_alerts && kafka-topics --bootstrap-server kafka:29092 --describe --topic trafic.accident_anomaly_alerts
     restart: "no"
 
+    deploy:
+      placement:
+        constraints:
+          - node.label.role == streaming
   redpanda-console:
     image: docker.redpanda.com/redpandadata/console:latest
     depends_on:
@@ -126,6 +147,10 @@ services:
       KAFKA_BROKERS: kafka:29092
     restart: unless-stopped
 
+    deploy:
+      placement:
+        constraints:
+          - node.label.role == streaming
   redis:
     image: redis:7-alpine
     command: redis-server --appendonly yes
@@ -140,6 +165,10 @@ services:
       retries: 12
     restart: unless-stopped
 
+    deploy:
+      placement:
+        constraints:
+          - node.label.role == streaming
   minio:
     image: minio/minio:RELEASE.2025-04-22T22-12-26Z
     command: server /data --console-address ":9001"
@@ -153,6 +182,10 @@ services:
       - minio-data:/data
     restart: unless-stopped
 
+    deploy:
+      placement:
+        constraints:
+          - node.label.role == analytics
   minio-init:
     image: minio/mc:RELEASE.2025-04-16T18-13-26Z
     depends_on:
@@ -163,6 +196,10 @@ services:
       - until mc alias set local http://minio:9000 minioadmin minioadmin; do sleep 2; done; mc mb --ignore-existing local/traffic-lake
     restart: "no"
 
+    deploy:
+      placement:
+        constraints:
+          - node.label.role == analytics
   iceberg-postgres:
     image: postgres:16-alpine
     environment:
@@ -178,6 +215,10 @@ services:
       retries: 12
     restart: unless-stopped
 
+    deploy:
+      placement:
+        constraints:
+          - node.label.role == analytics
   iceberg-rest:
     image: tabulario/iceberg-rest:1.6.0
     depends_on:
@@ -201,6 +242,10 @@ services:
       - "18181:8181"
     restart: unless-stopped
 
+    deploy:
+      placement:
+        constraints:
+          - node.label.role == analytics
   trino:
     image: trinodb/trino:455
     mem_limit: 3g
@@ -224,7 +269,12 @@ services:
       retries: 12
     restart: unless-stopped
 
+    deploy:
+      placement:
+        constraints:
+          - node.label.role == analytics
   mlflow:
+    image: big-data-project-mlflow:latest
     build:
       context: ./mlflow
     depends_on:
@@ -250,6 +300,10 @@ services:
       retries: 12
     restart: unless-stopped
 
+    deploy:
+      placement:
+        constraints:
+          - node.label.role == analytics
   airflow-postgres:
     image: postgres:16-alpine
     environment:
@@ -265,7 +319,12 @@ services:
       retries: 12
     restart: unless-stopped
 
+    deploy:
+      placement:
+        constraints:
+          - node.label.role == analytics
   airflow:
+    image: big-data-project-airflow:latest
     build:
       context: ./airflow
     depends_on:
@@ -352,7 +411,12 @@ services:
         exec airflow webserver
     restart: unless-stopped
 
+    deploy:
+      placement:
+        constraints:
+          - node.label.role == analytics
   airflow-train-model-once:
+    image: big-data-project-airflow:latest
     build:
       context: ./airflow
     depends_on:
@@ -421,6 +485,10 @@ services:
         airflow dags test train_traffic_kmeans_30m "$${logical_date}"
     restart: "no"
 
+    deploy:
+      placement:
+        constraints:
+          - node.label.role == streaming
   flink-jobmanager:
     build:
       context: ./flink
@@ -435,34 +503,63 @@ services:
         parallelism.default: 3
         cluster.evenly-spread-out-slots: true
 
+    deploy:
+      placement:
+        constraints:
+          - node.label.role == streaming
   flink-taskmanager:
     <<: *flink-taskmanager-base
 
+    deploy:
+      placement:
+        constraints:
+          - node.label.role == streaming
   flink-taskmanager-2:
     <<: *flink-taskmanager-base
 
+    deploy:
+      placement:
+        constraints:
+          - node.label.role == streaming
   flink-taskmanager-3:
     <<: *flink-taskmanager-base
 
+    deploy:
+      placement:
+        constraints:
+          - node.label.role == streaming
   traffic-sensor-producer-0:
     <<: *sensor-producer-base
     environment:
       <<: *sensor-producer-env
       PRODUCER_ID: "0"
 
+    deploy:
+      placement:
+        constraints:
+          - node.label.role == streaming
   traffic-sensor-producer-1:
     <<: *sensor-producer-base
     environment:
       <<: *sensor-producer-env
       PRODUCER_ID: "1"
 
+    deploy:
+      placement:
+        constraints:
+          - node.label.role == streaming
   traffic-sensor-producer-2:
     <<: *sensor-producer-base
     environment:
       <<: *sensor-producer-env
       PRODUCER_ID: "2"
 
+    deploy:
+      placement:
+        constraints:
+          - node.label.role == streaming
   traffic-weather-producer:
+    image: big-data-project-producer:latest
     build:
       context: ./producer
     command: ["python", "weather_producer.py"]
@@ -478,7 +575,12 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
+    deploy:
+      placement:
+        constraints:
+          - node.label.role == streaming
   traffic-anomaly-api:
+    image: big-data-project-producer:latest
     build:
       context: ./producer
     command: ["uvicorn", "anomaly_api:app", "--host", "0.0.0.0", "--port", "8000"]
@@ -497,6 +599,10 @@ services:
       retries: 12
     restart: unless-stopped
 
+    deploy:
+      placement:
+        constraints:
+          - node.label.role == streaming
   flink-enrich-job-submitter:
     image: big-data-project-flink-py:1.19.1
     environment:
@@ -520,6 +626,10 @@ services:
       - for i in {1..60}; do flink list -m flink-jobmanager:8081 >/dev/null 2>&1 && break; sleep 2; done; if flink list -r -m flink-jobmanager:8081 | grep -q "raw-to-enriched-state-window"; then echo "Raw enrich job already running"; else flink run -d -m flink-jobmanager:8081 -C file:///opt/flink/lib/flink-sql-connector-kafka-3.2.0-1.19.jar -py /opt/flink/jobs/raw_to_enriched.py; fi
     restart: "no"
 
+    deploy:
+      placement:
+        constraints:
+          - node.label.role == streaming
   flink-predict-job-submitter:
     image: big-data-project-flink-py:1.19.1
     environment:
@@ -552,6 +662,10 @@ services:
       - for i in {1..60}; do flink list -m flink-jobmanager:8081 >/dev/null 2>&1 && break; sleep 2; done; if flink list -r -m flink-jobmanager:8081 | grep -q "enriched-to-kmeans-state-prediction-30m"; then echo "Prediction job already running"; else flink run -d -p 1 -m flink-jobmanager:8081 -C file:///opt/flink/lib/flink-sql-connector-kafka-3.2.0-1.19.jar -py /opt/flink/jobs/enriched_to_predictions.py; fi
     restart: "no"
 
+    deploy:
+      placement:
+        constraints:
+          - node.label.role == streaming
   flink-congestion-cep-job-submitter:
     image: big-data-project-flink-py:1.19.1
     environment:
@@ -577,6 +691,10 @@ services:
       - for i in {1..60}; do flink list -m flink-jobmanager:8081 >/dev/null 2>&1 && break; sleep 2; done; if flink list -r -m flink-jobmanager:8081 | grep -q "congestion-cep-alerts"; then echo "Congestion CEP job already running"; else flink run -d -p 2 -m flink-jobmanager:8081 -C file:///opt/flink/lib/flink-sql-connector-kafka-3.2.0-1.19.jar -py /opt/flink/jobs/congestion_cep_alerts.py; fi
     restart: "no"
 
+    deploy:
+      placement:
+        constraints:
+          - node.label.role == streaming
   flink-accident-anomaly-job-submitter:
     image: big-data-project-flink-py:1.19.1
     environment:
@@ -600,6 +718,10 @@ services:
       - -lc
       - for i in {1..60}; do flink list -m flink-jobmanager:8081 >/dev/null 2>&1 && break; sleep 2; done; if flink list -r -m flink-jobmanager:8081 | grep -q "accident-anomaly-alerts"; then echo "Accident anomaly job already running"; else flink run -d -p 2 -m flink-jobmanager:8081 -C file:///opt/flink/lib/flink-sql-connector-kafka-3.2.0-1.19.jar -py /opt/flink/jobs/accident_anomaly_alerts.py; fi
     restart: "no"
+    deploy:
+      placement:
+        constraints:
+          - node.label.role == streaming
   clickhouse:
     image: clickhouse/clickhouse-server:24.8
     hostname: clickhouse
@@ -626,7 +748,12 @@ services:
       timeout: 5s
       retries: 12
     restart: unless-stopped
+    deploy:
+      placement:
+        constraints:
+          - node.label.role == analytics
   streamlit-alert:
+    image: big-data-project-streamlit-alert:latest
     build:
       context: ./streamlit-alert
     environment:
@@ -643,7 +770,12 @@ services:
       kafka-topic-init:
         condition: service_completed_successfully
     restart: unless-stopped
+    deploy:
+      placement:
+        constraints:
+          - node.label.role == analytics
   superset:
+    image: big-data-project-superset:latest
     build:
       context: ./superset
     depends_on:
@@ -674,6 +806,10 @@ services:
         -u "clickhousedb+connect://default:@clickhouse:8123/traffic_analytics" &&
         superset run -h 0.0.0.0 -p 8088
     restart: unless-stopped
+    deploy:
+      placement:
+        constraints:
+          - node.label.role == analytics
 volumes:
   registry-data:
   airflow-logs:
