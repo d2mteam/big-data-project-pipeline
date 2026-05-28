@@ -9,7 +9,7 @@ RUN apt-get update \
     apache-beam==2.48.0 \
     avro-python3==1.10.2 \
     kafka-python==2.0.2 \
-    mlflow==2.19.0 \
+    mlflow==2.21.3 \
     pandas==2.2.3 \
     protobuf==3.20.3 \
     redis==5.2.1 \
