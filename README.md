@@ -1,357 +1,214 @@
-# Big Data Traffic State Pipeline
+﻿# Big Data Traffic State Pipeline
 
-He thong xu ly trang thai giao thong realtime tai Ha Noi theo kieu lakehouse:
-Flink xu ly streaming, Airflow orchestration, Trino query SQL, Iceberg luu bang
-tren MinIO, Redis lam online feature store, MLflow quan ly model.
+Hệ thống xử lý trạng thái giao thông thời gian thực cho Hà Nội theo kiến trúc Lakehouse.
+Pipeline phối hợp nhiều thành phần: Kafka, Flink, Trino, Iceberg, MinIO, Airflow, Redis, MLflow, ClickHouse, Superset và Streamlit.
 
-## Architecture
+## Tổng quan
+
+Mục tiêu của dự án là xây dựng một nền tảng phân tích và dự báo trạng thái giao thông bằng cách:
+
+- phát lại dữ liệu lịch sử từ `hanoi_traffic_train_data.json`
+- thu thập sự kiện cảm biến giao thông và thời tiết vào Kafka
+- enrich sự kiện bằng Flink với các đặc trưng trượt/lag
+- ingest dữ liệu enriched vào Iceberg qua Trino
+- tính toán long-term features với Trino
+- lưu trữ feature online trong Redis
+- huấn luyện mô hình KMeans trạng thái và chuyển tiếp 30 phút bằng Airflow + MLflow
+- hỗ trợ báo cáo, dashboard và cảnh báo bằng ClickHouse/Superset/Streamlit
+
+## Kiến trúc hệ thống
 
 ```mermaid
 flowchart LR
-    API["Traffic API<br/>replay JSON data"] --> Producer["Python Producer"]
-    Producer --> Raw["Kafka: trafic.raw_events"]
-    Raw --> Enrich["Flink: raw_to_enriched"]
-    Enrich --> Enriched["Kafka: trafic.enriched_events"]
+    TrafficAPI["Traffic API<br/>Replay historical traffic JSON"] -->|Sự kiện raw sensor/weather| SensorProducer["Producer: traffic-sensor-producer / traffic-weather-producer"]
+    SensorProducer -->|Kafka topic| RawSensor["Kafka: trafic.raw_sensor"]
+    SensorProducer -->|Kafka topic| RawWeather["Kafka: trafic.raw_weather"]
 
-    Enriched --> TrinoKafka["Trino Kafka catalog"]
-    TrinoKafka --> Ingest["Airflow: kafka_enriched_to_iceberg"]
-    Ingest --> IcebergEvents["Iceberg: traffic.enriched_events"]
-    IcebergEvents --> Features["Airflow: compute_longterm_features"]
-    Features --> Redis["Redis Feature Store"]
-    Features --> IcebergFeatures["Iceberg: traffic.longterm_features"]
+    FlinkEnrich["Flink: raw_to_enriched"] -->|Kafka topic| Enriched["Kafka: trafic.enriched_events"]
+    Enriched --> AirflowIngest["Airflow: kafka_enriched_to_iceberg"]
+    AirflowIngest --> IcebergEnriched["Iceberg: traffic.enriched_events"]
 
-    IcebergEvents --> Train["Airflow: train_traffic_kmeans_30m"]
-    IcebergFeatures --> Train
-    Train --> TrainingTable["Iceberg: traffic.training_kmeans_30m"]
-    Train --> MLflow["MLflow Model Registry"]
+    IcebergEnriched --> AirflowFeature["Airflow: compute_longterm_features"]
+    AirflowFeature --> IcebergLongterm["Iceberg: traffic.longterm_features"]
+    AirflowFeature --> Redis["Redis: online feature store"]
 
-    MinIO["MinIO: traffic-lake/warehouse"] --- IcebergEvents
-    MinIO --- IcebergFeatures
-    MinIO --- TrainingTable
+    IcebergEnriched --> AirflowTrain["Airflow: train_traffic_kmeans_30m"]
+    IcebergLongterm --> AirflowTrain
+    AirflowTrain --> IcebergTraining["Iceberg: traffic.training_kmeans_30m"]
+    AirflowTrain --> MLflow["MLflow model registry"]
+
+    MLflow --> FlinkPredict["Flink: enriched_to_predictions"]
+    FlinkPredict -->|Kafka topic| Predictions["Kafka: trafic.predictions"]
+
+    Enriched --> FlinkCEP["Flink CEP alerts"]
+    FlinkCEP -->|Kafka topic| CongestionAlerts["Kafka: trafic.congestion_alerts"]
+    Enriched --> FlinkAccident["Flink accident/anomaly alerts"]
+    FlinkAccident -->|Kafka topic| AccidentAlerts["Kafka: trafic.accident_anomaly_alerts"]
+
+    Enriched --> ClickHouse["ClickHouse analytics"]
+    ClickHouse --> Superset["Superset dashboard"]
+    ClickHouse --> Streamlit["Streamlit alert/dashboard"]
+
+    IcebergEnriched --- MinIO["MinIO: traffic-lake/warehouse"]
+    IcebergLongterm --- MinIO
+    IcebergTraining --- MinIO
+    MLflow --- MinIO
 ```
 
-## Data Flow
+## Thành phần chính
 
-### Realtime
+- `traffic-api`: replay file `hanoi_traffic_train_data.json` thành API HTTP.
+- `traffic-sensor-producer`, `traffic-weather-producer`: đọc API và publish raw events vào Kafka.
+- `flink-enrich-job-submitter`: submit job Flink `raw_to_enriched.py` để tạo `trafic.enriched_events`.
+- `airflow`: chạy DAG ingest, feature và training.
+- `kafka_enriched_to_iceberg`: ingest dữ liệu enriched Kafka vào Iceberg.
+- `compute_longterm_features`: tính long-term features và lưu vào Iceberg + Redis.
+- `train_traffic_kmeans_30m`: xây dựng dataset, train KMeans và log model vào MLflow.
+- `trino`: SQL engine cho Kafka và Iceberg.
+- `iceberg-rest`: Iceberg catalog với metadata PostgreSQL và storage MinIO.
+- `minio`: object store cho Iceberg, MLflow artifact.
+- `mlflow`: experiment tracking và model registry.
+- `redis`: online feature store.
+- `clickhouse`, `superset`, `streamlit-alert`: analytics và dashboard.
+- `redpanda-console`: UI xem Kafka topic.
 
-```text
-hanoi_traffic_train_data.json
-  -> Traffic API
-  -> Python Producer
-  -> Kafka [trafic.raw_events]
-  -> Flink raw_to_enriched
-       lag features + rolling features theo tung tuyen duong
-  -> Kafka [trafic.enriched_events]
-```
+## Luồng dữ liệu
 
-Prediction path dang tat khoi default compose de thiet ke lai.
+1. `traffic-api` replay dữ liệu lịch sử.
+2. Producer thu thập sensor và weather gửi vào Kafka topic:
+   - `trafic.raw_sensor`
+   - `trafic.raw_weather`
+3. Flink enrich đọc hai topic raw và tạo topic:
+   - `trafic.enriched_events`
+4. Airflow ingest và persist enriched event vào Iceberg:
+   - `iceberg.traffic.enriched_events`
+5. Airflow tính toán long-term features và lưu vào:
+   - `iceberg.traffic.longterm_features`
+   - Redis feature store
+6. Airflow train KMeans trạng thái 30 phút, ghi:
+   - `iceberg.traffic.training_kmeans_30m`
+   - MLflow model registry `traffic_state_kmeans_30m@champion`
+7. Flink prediction và alert jobs sinh ra:
+   - `trafic.predictions`
+   - `trafic.congestion_alerts`
+   - `trafic.accident_anomaly_alerts`
 
-### Batch And Training
+## Cổng truy cập local
 
-```text
-Kafka [trafic.enriched_events]
-  -> Trino kafka catalog
-  -> Airflow kafka_enriched_to_iceberg
-  -> Iceberg [traffic.enriched_events]
-
-Iceberg traffic.enriched_events
-  -> Airflow compute_longterm_features
-  -> Iceberg [traffic.longterm_features]
-  -> Redis Feature Store
-
-Iceberg enriched_events + longterm_features
-  -> Airflow train_traffic_kmeans_30m (moi thu Hai, 02:00)
-       point-in-time join feature theo route/hour/day_of_week
-       ghi debug dataset vao Iceberg [traffic.training_kmeans_30m]
-       train KMeans voi 3 cum trang thai
-       tinh transition cluster(t) -> cluster(t+30m)
-  -> MLflow Registry [traffic_state_kmeans_30m@champion]
-```
-
-## KMeans 30-Minute Forecast
-
-KMeans la thuat toan khong giam sat, nen model khong hoc nhan
-`target_15m/30m/60m`. Pipeline su dung cach sau:
-
-1. KMeans phan cum cac quan sat giao thong thanh `clear`, `moderate`,
-   `congested` dua tren feature realtime va long-term.
-2. Tu du lieu lich su, DAG dem chuyen tiep giua cum tai thoi diem `t` va
-   cum cung tuyen tai `t + 30 minutes`.
-3. Khi inference, Flink xac dinh cum hien tai va dung chuyen tiep pho bien
-   nhat de uoc luong trang thai sau 30 phut.
-
-## Services
-
-| Service | Role |
-| --- | --- |
-| Traffic API | Replay historical traffic JSON as stream-like events |
-| Python Producer | Poll API and publish raw Kafka events |
-| Kafka | Broker for raw and enriched topics |
-| Flink | Enrich events with state/window features |
-| MinIO | Object store for Iceberg warehouse and MLflow artifacts |
-| Iceberg REST | Iceberg catalog backed by Postgres metadata |
-| Trino | SQL engine for Kafka and Iceberg |
-| Airflow | Run Trino ingest/query jobs, compute features and train KMeans |
-| Redis | Online long-term feature store |
-| MLflow | Experiment tracking and registered KMeans model |
-| Redpanda Console | Kafka monitoring UI |
-
-## Local UIs
-
-| UI | URL |
+| Service | URL |
 | --- | --- |
 | Airflow | http://localhost:8080 |
-| Flink | http://localhost:8081 |
+| Flink JobManager | http://localhost:8081 |
 | Redpanda Console | http://localhost:8082 |
 | Trino | http://localhost:18083 |
 | MLflow | http://localhost:15000 |
 | MinIO Console | http://localhost:19001 |
+| ClickHouse | http://localhost:18123 |
+| Superset | http://localhost:8088 |
+| Streamlit Alert | http://localhost:8501 |
+| Traffic API | http://localhost:18000 |
+| Anomaly API | http://localhost:18010 |
 
-## Huong Dan Chay Chi Tiet
+## Khởi động nhanh
 
-### 1. Mo PowerShell Tai Thu Muc Du An
+### Yêu cầu
 
-```powershell
-cd D:\Downloads\big-data-project-pipeline-master\big-data-project-pipeline-master
-```
+- Docker Desktop
+- Docker Compose
+- Windows PowerShell hoặc terminal tương tự
 
-Kiem tra Docker va cau hinh Compose:
-
-```powershell
-docker version
-docker compose config --quiet
-```
-
-### 2. Build Image
+### 1. Build image
 
 ```powershell
 docker compose build
 ```
 
-Buoc nay build cac image Airflow, Flink, Traffic API, Producer va MLflow.
+### 2. Khởi động dịch vụ
 
-### 3. Khoi Dong Ha Tang Nen
+Để chạy toàn bộ môi trường, dùng:
 
-Chua bat producer va job prediction o buoc nay, de model duoc train truoc khi
-luong du doan bat dau ghi ket qua.
+```powershell
+docker compose up -d --build
+```
 
+Nếu muốn chỉ khởi động phần cốt lõi trước,
 ```powershell
 docker compose up -d kafka minio redis mlflow airflow traffic-api redpanda-console flink-jobmanager flink-taskmanager
 ```
 
-Hai service khoi tao `kafka-topic-init` va `minio-init` se duoc chay theo
-dependency. Neu chung dung voi trang thai `Exited (0)` thi do la ket qua binh
-thuong sau khi tao topic va bucket xong.
-
-Kiem tra trang thai:
+### 3. Kiểm tra trạng thái
 
 ```powershell
 docker compose ps -a
 ```
 
-Thong tin dang nhap UI:
-
-| Dich vu | URL | Tai khoan |
-| --- | --- | --- |
-| Airflow | http://localhost:8080 | `admin` / `admin` |
-| Flink | http://localhost:8081 | Khong can |
-| MLflow | http://localhost:15000 | Khong can |
-| MinIO | http://localhost:19001 | `minioadmin` / `minioadmin` |
-| Redpanda Console | http://localhost:8082 | Khong can |
-
-### 4. Kiem Tra DAG Trong Airflow
-
-Mo Airflow UI hoac dung lenh:
+### 4. Kiểm tra DAG Airflow
 
 ```powershell
 docker compose exec airflow airflow dags list
 docker compose exec airflow airflow dags list-import-errors
 ```
 
-Can thay cac DAG chinh:
+Các DAG chính:
 
-```text
-kafka_enriched_to_iceberg
-compute_longterm_features
-train_traffic_kmeans_30m
-```
+- `kafka_enriched_to_iceberg`
+- `compute_longterm_features`
+- `train_traffic_kmeans_30m`
 
-`kafka_predictions_to_minio_parquet` dang pause/disable vi prediction path dang
-duoc thiet ke lai.
+## Chạy luồng dữ liệu
 
-### 5. Kiem Tra Realtime Enrich
-
-Default compose da bat `traffic-producer` va `flink-enrich-job-submitter`.
-Luong du lieu:
-
-```text
-Traffic API
-  -> Producer
-  -> Kafka [trafic.raw_events]
-  -> Flink raw_to_enriched
-  -> Kafka [trafic.enriched_events]
-```
-
-Kiem tra Flink job:
-
-```powershell
-docker compose exec flink-jobmanager flink list
-```
-
-Can thay job:
-
-```text
-raw-to-enriched-state-window
-```
-
-Kiem tra enriched event:
-
-```powershell
-docker compose exec kafka kafka-console-consumer `
-  --bootstrap-server kafka:29092 `
-  --topic trafic.enriched_events `
-  --from-beginning `
-  --max-messages 3
-```
-
-### 6. Nap Enriched Events Vao Iceberg
-
-DAG nay tu chay moi phut. Trigger thu cong:
+### 1. Ingest Kafka -> Iceberg
 
 ```powershell
 docker compose exec airflow airflow dags trigger kafka_enriched_to_iceberg
 ```
 
-Kiem tra bang Iceberg qua Trino:
-
-```powershell
-docker compose exec trino trino --execute `
-  "SELECT count(*), min(event_ts), max(event_ts) FROM iceberg.traffic.enriched_events"
-```
-
-### 7. Tinh Long-Term Features Va Ghi Vao Redis
+### 2. Tính long-term features
 
 ```powershell
 docker compose exec airflow airflow dags trigger compute_longterm_features
 ```
 
-Luong xu ly:
-
-```text
-Iceberg [traffic.enriched_events]
-  -> Trino SQL tinh long-term features
-  -> Iceberg [traffic.longterm_features]
-  -> Redis Feature Store
-```
-
-Kiem tra:
+### 3. Train mô hình
 
 ```powershell
+docker compose exec airflow airflow dags trigger train_traffic_kmeans_30m
+```
+
+## Kiểm tra dữ liệu
+
+- Enriched events trong Iceberg:
+  ```powershell
+docker compose exec trino trino --execute "SELECT count(*), min(event_ts), max(event_ts) FROM iceberg.traffic.enriched_events"
+  ```
+- Long-term features:
+  ```powershell
 docker compose exec trino trino --execute "SELECT count(*) FROM iceberg.traffic.longterm_features"
-docker compose exec redis redis-cli --scan --pattern "traffic:longterm:*" | head
-```
-
-### 8. Train Model KMeans Cho Horizon 30 Phut
-
-```powershell
-docker compose exec airflow airflow dags trigger train_traffic_kmeans_30m
-```
-
-DAG se thuc hien:
-
-```text
-Iceberg enriched_events + longterm_features
-  -> point-in-time join feature
-  -> ghi debug dataset vao Iceberg [traffic.training_kmeans_30m]
-  -> train KMeans 3 cum trang thai
-  -> hoc transition cluster(t) -> cluster(t+30m)
-  -> log model va transition_30m.json vao MLflow
-  -> dang ky traffic_state_kmeans_30m@champion
-```
-
-Kiem tra dataset train:
-
-```powershell
+  ```
+- Training dataset:
+  ```powershell
 docker compose exec trino trino --execute "SELECT count(*) FROM iceberg.traffic.training_kmeans_30m"
-```
+  ```
 
-### 9. Kiem Tra Model Tren MLflow
+## Dừng và dọn dẹp
 
-Mo MLflow UI tai:
-
-```text
-http://localhost:15000
-```
-
-Kiem tra:
-
-```text
-Experiment: traffic-state-kmeans-30m
-Registered model: traffic_state_kmeans_30m
-Alias: champion
-Artifact: transition_30m.json
-```
-
-## Lenh Chay Nhanh
-
-```powershell
-docker compose build
-
-docker compose up -d --build
-
-# Doi mot lat de Kafka/Flink co enriched events.
-docker compose exec airflow airflow dags trigger kafka_enriched_to_iceberg
-docker compose exec airflow airflow dags trigger compute_longterm_features
-docker compose exec airflow airflow dags trigger train_traffic_kmeans_30m
-```
-
-## Dung He Thong
-
-Dung va xoa container/network, nhung giu data trong volume:
-
-```powershell
+- Dừng các container nhưng giữ dữ liệu:
+  ```powershell
 docker compose down
-```
-
-Tam dung container, sau do co the bat lai bang `docker compose start`:
-
-```powershell
+  ```
+- Chỉ tạm dừng:
+  ```powershell
 docker compose stop
 docker compose start
-```
-
-Dung va xoa toan bo data MinIO, Iceberg catalog, Redis, MLflow va Airflow logs:
-
-```powershell
+  ```
+- Xóa dữ liệu toàn bộ volume (cảnh báo: mất dữ liệu Iceberg/MLflow/Redis/Airflow):
+  ```powershell
 docker compose down -v
-```
+  ```
 
-Can than voi `-v` vi model va du lieu Iceberg da tao se bi xoa.
+## Ghi chú
 
-## He Thong Co Tu Chay Khong
-
-Sau khi khoi dong bang `docker compose up -d`, viec dong cua so PowerShell
-khong lam dung container. Khi cac container dang chay:
-
-| Thanh phan | Hanh vi |
-| --- | --- |
-| `traffic-producer` | Tiep tuc phat su kien moi giay |
-| Flink jobs | Tiep tuc enrich neu job dang active |
-| `kafka_enriched_to_iceberg` | Chay moi phut |
-| `compute_longterm_features` | Chay moi phut |
-| `train_traffic_kmeans_30m` | Chay thu Hai luc `02:00` |
-| `kafka_predictions_to_minio_parquet` | Dang pause/disable |
-
-Mot so service co `restart: unless-stopped` se tu khoi dong lai khi Docker
-Desktop khoi dong lai. Tuy nhien de dam bao toan bo Kafka/Flink/API va cac
-job deu day du sau khi may khoi dong lai, nen kiem tra:
-
-```powershell
-docker compose ps -a
-```
-
-Neu khong muon pipeline tiep tuc sinh data, dung:
-
-```powershell
-docker compose stop
-```
+- `docker compose down -v` sẽ xóa toàn bộ dữ liệu lượng chết, bao gồm metadata Iceberg và mô hình MLflow.
+- Các service có `restart: unless-stopped` sẽ khởi động lại khi Docker Desktop mở lại.
+- Dịch vụ Flink submitter được cấu hình để giữ job chạy dưới dạng detached.
+- Các topic Kafka chính hiện tại dùng tiền tố `trafic.*` theo cấu hình trong compose.
