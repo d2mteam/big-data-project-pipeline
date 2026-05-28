@@ -538,11 +538,87 @@ services:
       - -lc
       - for i in {1..60}; do flink list -m flink-jobmanager:8081 >/dev/null 2>&1 && break; sleep 2; done; if flink list -r -m flink-jobmanager:8081 | grep -q "accident-anomaly-alerts"; then echo "Accident anomaly job already running"; else flink run -d -m flink-jobmanager:8081 -C file:///opt/flink/lib/flink-sql-connector-kafka-3.2.0-1.19.jar -py /opt/flink/jobs/accident_anomaly_alerts.py; fi
     restart: "no"
-
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    hostname: clickhouse
+    ports:
+      - "18123:8123"
+    environment:
+      CLICKHOUSE_DB: traffic_analytics
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ""
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - ./clickhouse/init:/docker-entrypoint-initdb.d:ro
+    depends_on:
+      kafka-topic-init:
+        condition: service_completed_successfully
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: [ "CMD-SHELL", "clickhouse-client --query 'SELECT 1'" ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+  streamlit-alert:
+    build:
+      context: ./streamlit-alert
+    environment:
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: "8123"
+      CLICKHOUSE_DATABASE: traffic_analytics
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ""
+    ports:
+      - "8501:8501"
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      kafka-topic-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+  superset:
+    build:
+      context: ./superset
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    environment:
+      SUPERSET_SECRET_KEY: "change-this-to-a-long-random-secret"
+      SQLALCHEMY_DATABASE_URI: sqlite:////app/superset_home/superset.db
+    volumes:
+      - ./superset/superset_config.py:/app/pythonpath/superset_config.py:ro
+      - superset-home:/app/superset_home
+    ports:
+      - "8088:8088"
+    command:
+      - sh
+      - -c
+      - |
+        superset db upgrade &&
+        superset fab create-admin \
+          --username admin \
+          --firstname Superset \
+          --lastname Admin \
+          --email admin@example.com \
+          --password admin || true &&
+        superset init &&
+            superset set-database-uri \
+        -d clickhouse \
+        -u "clickhousedb+connect://default:@clickhouse:8123/traffic_analytics" &&
+        superset run -h 0.0.0.0 -p 8088
+    restart: unless-stopped
 volumes:
   airflow-logs:
   airflow-postgres-data:
   iceberg-postgres-data:
   mlflow-data:
   minio-data:
+  clickhouse-data:
   redis-data:
+  superset-home:
+  
