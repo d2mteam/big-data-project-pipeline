@@ -1,42 +1,42 @@
 #!/usr/bin/env bash
+# Push tất cả built images lên local registry để máy khác pull về
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 REGISTRY="${REGISTRY:-localhost:5000}"
-PROJECT="${PROJECT:-traffic}"
 
-echo "Starting local registry at ${REGISTRY}..."
-docker compose up -d registry
+G='\033[0;32m'; B='\033[0;34m'; N='\033[0m'
+info() { echo -e "${B}▶${N} $*"; }
+ok()   { echo -e "${G}✓${N} $*"; }
 
-echo "Building project images..."
-docker build -t big-data-project-traffic-api ./traffic-api
-docker build -t big-data-project-traffic-sensor-producer ./producer
-docker build -t big-data-project-flink-py:1.19.1 ./flink
-docker build -t big-data-project-airflow ./airflow
-docker build -t big-data-project-mlflow ./mlflow
-docker build -t big-data-project-streamlit-alert ./streamlit-alert
-docker build -t big-data-project-superset ./superset
-
+# local_tag → registry_name
 declare -A IMAGES=(
-  ["traffic-api"]="big-data-project-traffic-api"
-  ["producer"]="big-data-project-traffic-sensor-producer"
-  ["flink-py"]="big-data-project-flink-py:1.19.1"
-  ["airflow"]="big-data-project-airflow"
-  ["mlflow"]="big-data-project-mlflow"
-  ["streamlit-alert"]="big-data-project-streamlit-alert"
-  ["superset"]="big-data-project-superset"
+  ["big-data-project-traffic-api:latest"]="traffic-api:latest"
+  ["big-data-project-producer:latest"]="producer:latest"
+  ["big-data-project-flink-py:1.19.1"]="flink-py:1.19.1"
+  ["big-data-project-airflow:latest"]="airflow:latest"
+  ["big-data-project-mlflow:latest"]="mlflow:latest"
+  ["big-data-project-streamlit-alert:latest"]="streamlit-alert:latest"
+  ["big-data-project-superset:latest"]="superset:latest"
 )
 
-for name in "${!IMAGES[@]}"; do
-  local_image="${IMAGES[$name]}"
-  remote_image="${REGISTRY}/${PROJECT}/${name}:latest"
-  echo "Tagging ${local_image} -> ${remote_image}"
-  docker tag "${local_image}" "${remote_image}"
-  echo "Pushing ${remote_image}"
-  docker push "${remote_image}"
+info "Đảm bảo registry đang chạy..."
+docker compose -f "$PROJECT_DIR/docker-compose.yml" up -d registry
+
+info "Build tất cả images..."
+docker compose -f "$PROJECT_DIR/docker-compose.yml" build
+
+info "Push lên registry $REGISTRY ..."
+for local_tag in "${!IMAGES[@]}"; do
+  remote_tag="$REGISTRY/${IMAGES[$local_tag]}"
+  docker tag "$local_tag" "$remote_tag"
+  docker push "$remote_tag"
+  ok "$local_tag → $remote_tag"
 done
 
-echo
-echo "Pushed images:"
-for name in "${!IMAGES[@]}"; do
-  echo "  ${REGISTRY}/${PROJECT}/${name}:latest"
+echo ""
+ok "Xong! Máy khác pull về bằng:"
+for local_tag in "${!IMAGES[@]}"; do
+  echo "  docker pull $REGISTRY/${IMAGES[$local_tag]}"
 done
