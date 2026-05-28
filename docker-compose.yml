@@ -416,7 +416,6 @@ services:
         constraints:
           - node.label.role == analytics
   airflow-train-model-once:
-    image: big-data-project-airflow:latest
     build:
       context: ./airflow
     depends_on:

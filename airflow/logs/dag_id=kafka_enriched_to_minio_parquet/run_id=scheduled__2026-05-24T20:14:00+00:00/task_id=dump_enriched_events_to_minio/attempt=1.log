@@ -1,0 +1,42 @@
+[2026-05-24T20:15:41.469+0000] {local_task_job_runner.py:123} INFO - ::group::Pre task execution logs
+[2026-05-24T20:15:41.475+0000] {taskinstance.py:2614} INFO - Dependencies all met for dep_context=non-requeueable deps ti=<TaskInstance: kafka_enriched_to_minio_parquet.dump_enriched_events_to_minio scheduled__2026-05-24T20:14:00+00:00 [queued]>
+[2026-05-24T20:15:41.479+0000] {taskinstance.py:2614} INFO - Dependencies all met for dep_context=requeueable deps ti=<TaskInstance: kafka_enriched_to_minio_parquet.dump_enriched_events_to_minio scheduled__2026-05-24T20:14:00+00:00 [queued]>
+[2026-05-24T20:15:41.480+0000] {taskinstance.py:2867} INFO - Starting attempt 1 of 1
+[2026-05-24T20:15:41.488+0000] {taskinstance.py:2890} INFO - Executing <Task(PythonOperator): dump_enriched_events_to_minio> on 2026-05-24 20:14:00+00:00
+[2026-05-24T20:15:41.492+0000] {standard_task_runner.py:72} INFO - Started process 91 to run task
+[2026-05-24T20:15:41.495+0000] {standard_task_runner.py:104} INFO - Running: ['airflow', 'tasks', 'run', 'kafka_enriched_to_minio_parquet', 'dump_enriched_events_to_minio', 'scheduled__2026-05-24T20:14:00+00:00', '--job-id', '2', '--raw', '--subdir', 'DAGS_FOLDER/kafka_enriched_to_minio_parquet.py', '--cfg-path', '/tmp/tmpptnzayf_']
+[2026-05-24T20:15:41.498+0000] {standard_task_runner.py:105} INFO - Job 2: Subtask dump_enriched_events_to_minio
+[2026-05-24T20:15:41.526+0000] {task_command.py:467} INFO - Running <TaskInstance: kafka_enriched_to_minio_parquet.dump_enriched_events_to_minio scheduled__2026-05-24T20:14:00+00:00 [running]> on host 1a320d8fd7d4
+[2026-05-24T20:15:41.556+0000] {taskinstance.py:3134} INFO - Exporting env vars: AIRFLOW_CTX_DAG_OWNER='airflow' AIRFLOW_CTX_DAG_ID='kafka_enriched_to_minio_parquet' AIRFLOW_CTX_TASK_ID='dump_enriched_events_to_minio' AIRFLOW_CTX_EXECUTION_DATE='2026-05-24T20:14:00+00:00' AIRFLOW_CTX_TRY_NUMBER='1' AIRFLOW_CTX_DAG_RUN_ID='scheduled__2026-05-24T20:14:00+00:00'
+[2026-05-24T20:15:41.557+0000] {taskinstance.py:732} INFO - ::endgroup::
+[2026-05-24T20:15:41.580+0000] {conn.py:380} INFO - <BrokerConnection node_id=bootstrap-0 host=kafka:29092 <connecting> [IPv4 ('10.251.6.2', 29092)]>: connecting to kafka:29092 [('10.251.6.2', 29092) IPv4]
+[2026-05-24T20:15:41.580+0000] {conn.py:1205} INFO - Probing node bootstrap-0 broker version
+[2026-05-24T20:15:41.581+0000] {conn.py:410} INFO - <BrokerConnection node_id=bootstrap-0 host=kafka:29092 <connecting> [IPv4 ('10.251.6.2', 29092)]>: Connection complete.
+[2026-05-24T20:15:41.687+0000] {conn.py:1267} INFO - Broker version identified as 2.5.0
+[2026-05-24T20:15:41.688+0000] {conn.py:1268} INFO - Set configuration api_version=(2, 5, 0) to skip auto check_version requests on startup
+[2026-05-24T20:15:41.689+0000] {subscription_state.py:171} INFO - Updating subscribed topics to: ('trafic.enriched_events',)
+[2026-05-24T20:15:41.693+0000] {cluster.py:371} INFO - Group coordinator for airflow-minio-parquet-sink is ('coordinator-1', 'kafka', 29092, None)
+[2026-05-24T20:15:41.694+0000] {base.py:693} INFO - Discovered coordinator coordinator-1 for group airflow-minio-parquet-sink
+[2026-05-24T20:15:41.694+0000] {base.py:741} INFO - Starting new heartbeat thread
+[2026-05-24T20:15:41.695+0000] {consumer.py:348} INFO - Revoking previously assigned partitions () for group airflow-minio-parquet-sink
+[2026-05-24T20:15:41.696+0000] {conn.py:380} INFO - <BrokerConnection node_id=coordinator-1 host=kafka:29092 <connecting> [IPv4 ('10.251.6.2', 29092)]>: connecting to kafka:29092 [('10.251.6.2', 29092) IPv4]
+[2026-05-24T20:15:41.696+0000] {conn.py:410} INFO - <BrokerConnection node_id=coordinator-1 host=kafka:29092 <connecting> [IPv4 ('10.251.6.2', 29092)]>: Connection complete.
+[2026-05-24T20:15:41.697+0000] {conn.py:919} INFO - <BrokerConnection node_id=bootstrap-0 host=kafka:29092 <connected> [IPv4 ('10.251.6.2', 29092)]>: Closing connection. 
+[2026-05-24T20:15:41.797+0000] {base.py:450} INFO - (Re-)joining group airflow-minio-parquet-sink
+[2026-05-24T20:15:41.827+0000] {base.py:521} INFO - Elected group leader -- performing partition assignments using range
+[2026-05-24T20:15:41.828+0000] {conn.py:380} INFO - <BrokerConnection node_id=1 host=kafka:29092 <connecting> [IPv4 ('10.251.6.2', 29092)]>: connecting to kafka:29092 [('10.251.6.2', 29092) IPv4]
+[2026-05-24T20:15:41.829+0000] {conn.py:410} INFO - <BrokerConnection node_id=1 host=kafka:29092 <connecting> [IPv4 ('10.251.6.2', 29092)]>: Connection complete.
+[2026-05-24T20:15:41.841+0000] {base.py:335} INFO - Successfully joined group airflow-minio-parquet-sink with generation 1
+[2026-05-24T20:15:41.842+0000] {subscription_state.py:257} INFO - Updated partition assignment: [('trafic.enriched_events', 0), ('trafic.enriched_events', 1), ('trafic.enriched_events', 2)]
+[2026-05-24T20:15:41.842+0000] {consumer.py:245} INFO - Setting newly assigned partitions (('trafic.enriched_events', 0), ('trafic.enriched_events', 1), ('trafic.enriched_events', 2)) for group airflow-minio-parquet-sink
+[2026-05-24T20:15:42.229+0000] {logging_mixin.py:190} INFO - Wrote 5000 records to s3://traffic-lake/traffic/enriched_events/dt=2026-05-24/hour=20/enriched_events_scheduled__2026-05-24T20-14-00+00-00.parquet
+[2026-05-24T20:15:42.229+0000] {base.py:748} INFO - Stopping heartbeat thread
+[2026-05-24T20:15:42.229+0000] {base.py:773} INFO - Leaving consumer group (airflow-minio-parquet-sink).
+[2026-05-24T20:15:42.238+0000] {conn.py:919} INFO - <BrokerConnection node_id=coordinator-1 host=kafka:29092 <connected> [IPv4 ('10.251.6.2', 29092)]>: Closing connection. 
+[2026-05-24T20:15:42.238+0000] {conn.py:919} INFO - <BrokerConnection node_id=1 host=kafka:29092 <connected> [IPv4 ('10.251.6.2', 29092)]>: Closing connection. 
+[2026-05-24T20:15:42.243+0000] {python.py:240} INFO - Done. Returned value was: None
+[2026-05-24T20:15:42.248+0000] {taskinstance.py:341} INFO - ::group::Post task execution logs
+[2026-05-24T20:15:42.249+0000] {taskinstance.py:353} INFO - Marking task as SUCCESS. dag_id=kafka_enriched_to_minio_parquet, task_id=dump_enriched_events_to_minio, run_id=scheduled__2026-05-24T20:14:00+00:00, execution_date=20260524T201400, start_date=20260524T201541, end_date=20260524T201542
+[2026-05-24T20:15:42.308+0000] {local_task_job_runner.py:266} INFO - Task exited with return code 0
+[2026-05-24T20:15:42.317+0000] {taskinstance.py:3901} INFO - 0 downstream tasks scheduled from follow-on schedule check
+[2026-05-24T20:15:42.317+0000] {local_task_job_runner.py:245} INFO - ::endgroup::
